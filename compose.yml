@@ -73,6 +73,11 @@ services:
       GITLAB_BASE_URL: ${GITLAB_BASE_URL}
       GITLAB_ACCESS_TOKEN: ${GITLAB_ACCESS_TOKEN}
 
+      # Document tools call the internal documents service. Credentials are
+      # never stored in tool source.
+      DOCUMENTS_BASE_URL: http://documents:8090
+      DOCUMENTS_API_KEY: ${DOCUMENTS_API_KEY}
+
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,10 +176,67 @@ services:
     networks:
       - ai-net
 
+  # Headless LibreOffice used only for the office-document to PDF step.
+  # Its internal port 3000 is not a clash with Open WebUI's published 3000:
+  # different containers, and Gotenberg publishes nothing.
+  gotenberg:
+    image: gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466
+    container_name: gotenberg
+    restart: unless-stopped
+
+    command:
+      - gotenberg
+      - --chromium-disable-javascript=true
+      - --api-timeout=120s
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+    networks:
+      - ai-net
+
+  # Markdown-sourced document authoring and rendering for the Letta document
+  # tools. The Letta tool sandbox runs in-process without per-tool
+  # dependencies, so pandoc and every rendering library live only here.
+  documents:
+    build: ./documents
+    container_name: documents
+    restart: unless-stopped
+
+    environment:
+      DOCUMENTS_API_KEY: ${DOCUMENTS_API_KEY}
+      DOCUMENTS_PUBLIC_BASE_URL: ${DOCUMENTS_PUBLIC_BASE_URL:-http://localhost:3000}
+      DOCUMENTS_DELIVERY_MODE: ${DOCUMENTS_DELIVERY_MODE:-openwebui}
+      GOTENBERG_URL: http://gotenberg:3000
+      OPENWEBUI_BASE_URL: http://open-webui:8080
+      OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY}
+
+    depends_on:
+      gotenberg:
+        condition: service_healthy
+
+    volumes:
+      - documents_data:/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8090/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+    networks:
+      - ai-net
+
 volumes:
   postgres_data:
   letta_data:
   openwebui_data:
+  documents_data:
 
 networks:
   ai-net:

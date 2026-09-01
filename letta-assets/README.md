@@ -34,6 +34,9 @@ API and is safe to run repeatedly.
   tools.
 - `agents/office-agent-gitlab-ci-worker.json`: A hidden, stateless GitLab CI
   specialist with seven pipeline, job, trace, run, retry, and cancel tools.
+- `agents/office-agent-documents-worker.json`: A hidden, stateless documents
+  specialist with seven authoring, rendering, and conversion tools. It turns
+  an already-grounded answer into a downloadable file and never researches.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
@@ -48,6 +51,10 @@ API and is safe to run repeatedly.
   reads, issue and merge-request workflows, and CI pipeline inspection/control.
   They authenticate directly to the configured GitLab instance with credentials
   injected into the Letta service environment.
+- `tools/document_*.py`: Markdown-sourced document authoring, rendering, and
+  file conversion. They exchange document ids and download URLs with the
+  internal `documents` service and never handle rendering libraries
+  themselves.
 
 ## Bootstrap
 
@@ -166,8 +173,80 @@ For cross-domain requests, the office manager gathers Confluence, Jira, GitLab
 issue, GitLab code, and GitLab CI evidence independently before making exactly
 one engineering-worker call. It can then invoke each relevant specialist once
 more for explicitly authorized writes, with at most two specialist mutation
-calls per user turn. Authorization for one system, GitLab project, resource, or
-operation never authorizes another.
+calls per user turn, and the documents worker once when the user explicitly
+asked for a file, plus once more to read that document back when the request
+revises it. That caps one turn at six calls for a read spanning all five
+evidence specializations, eight with authorized writes, nine when a document is
+also produced, and ten when an existing document is read back first. Authorization for one system, GitLab project,
+resource, or operation never authorizes another.
+
+The document activities are deliberately small and separate:
+
+- `document_create`: store a title and Markdown body, returning a `document_id`.
+- `document_get`: read the stored Markdown and metadata, bounded by `max_chars`.
+- `document_update`: replace the body, patch one unique span, or retitle.
+- `document_render`: render one format and return a download URL.
+- `document_list`: list recent documents with titles and revisions.
+- `document_convert`: convert supplied file bytes to PDF.
+- `document_delete`: remove a document and its renders.
+
+Download filenames come from the document title, which may be in any script:
+the slug keeps Unicode letters and digits rather than ASCII-folding them, so a
+Persian or CJK title still names its own file.
+
+Markdown is the source of truth. `.docx`, `.pdf`, `.html`, `.odt`, and `.txt`
+are disposable render artifacts, content-addressed by the source and format so
+re-rendering an unchanged document is free. `.pdf` is produced from the `.docx`
+rather than from Markdown independently, so a downloaded pair is the same
+document instead of two lookalikes that drift apart.
+
+Rendering does not run inside Letta. The tool sandbox is `local` with
+`use_venv` false, where per-tool `pip_requirements` are silently ignored and
+tools execute in the letta container's interpreter, so every document tool is
+standard library only and calls the `documents` service over HTTP. That service
+owns pandoc, the `reference.docx` styling, and the Gotenberg LibreOffice route
+used for PDF.
+
+Set `DOCUMENTS_API_KEY` in the root `.env`; it is a shared secret between the
+letta and documents containers, and `DOCUMENTS_BASE_URL` is set by Compose to
+the internal service address. `DOCUMENTS_PUBLIC_BASE_URL` must match the origin
+the user actually opens Open WebUI on, because it becomes the prefix of every
+download link.
+
+Delivery has two modes, selected by `DOCUMENTS_DELIVERY_MODE`:
+
+- `openwebui` (default) uploads each finished render into Open WebUI's files
+  API with `process=false`, skipping text extraction and RAG embedding, and
+  links to `/api/v1/files/{id}/content/{name}`. The user's already-authenticated
+  browser downloads it by cookie. It needs `OPENWEBUI_API_KEY`, created under
+  Settings > Account in Open WebUI. Open WebUI assigns the uploaded file to the
+  API key's owner and serves it only to that user or an admin, so this suits
+  single-operator and admin-user deployments.
+- `capability` serves unguessable expiring links from the documents service
+  itself at `/d/<token>/<name>`. It also works in the Letta ADE and needs no
+  Open WebUI credential, at the cost of publishing the service on a host port
+  and accepting an unauthenticated-but-unguessable URL.
+
+Bootstrap registers all seven document functions and attaches them only to the
+hidden documents worker. The office manager has no document tools. Unlike the
+five evidence specialists, the documents worker is mainly a producer: the
+manager calls it in `PRODUCE_DOCUMENT` mode only after successful engineering
+analysis, only when the original user explicitly asked for a file, and at most
+once per turn, under an allowance separate from the two-mutation cap.
+
+Revising an existing document needs one more step. The engineering worker has
+no document tools, so asking it to extend a document it cannot see only
+produces a request for the file. When a request changes, extends, corrects, or
+re-renders a document this workflow already produced, the manager first makes
+one `FETCH_DOCUMENT` call, which is restricted to `document_list` and
+`document_get` and returns the stored Markdown verbatim. That source goes to
+the engineering worker, which returns a complete replacement body, and the
+following `PRODUCE_DOCUMENT` call carries the existing `document_id` so the
+document is updated in place rather than duplicated. The documents worker is
+still never a research domain.
+
+Both the worker and the manager are required to relay each `download_url`
+verbatim; a tidied URL is a confident 404.
 
 The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 `LETTA_BASE_URL` in the process environment or pass `--base-url`. Use

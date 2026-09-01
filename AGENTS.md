@@ -10,10 +10,13 @@ This repository defines a Docker Compose stack containing:
 - A shared PostgreSQL server with separate databases and roles for Letta and
   Open WebUI.
 - PGVector for Open WebUI's vector storage.
+- A documents service that renders Markdown to `.docx`, `.pdf`, `.html`,
+  `.odt`, and `.txt`, with Gotenberg providing headless LibreOffice for the
+  PDF step.
 
 The main deployment definition is `compose.yml`. PostgreSQL initialization is
-handled by `postgres-init.sh`, and `letta-openai-proxy.py` implements the Letta
-adapter.
+handled by `postgres-init.sh`, `letta-openai-proxy.py` implements the Letta
+adapter, and `documents/` holds the document service and its image build.
 
 ## Required embedding configuration
 
@@ -125,6 +128,41 @@ When adding or changing an asset:
 6. Run `docker compose ps` and the embedding checks below before handing off
    changes that also affect Compose or environment settings.
 
+## Document service
+
+`documents/` is the only rendering runtime in the stack. Keep it that way:
+
+- Letta's tool sandbox is `{"type":"local","use_venv":false}`. Per-tool
+  `pip_requirements` are only installed inside a virtualenv, so under this
+  configuration they are silently ignored and tools run in the letta
+  container's interpreter. Every `letta-assets/tools/*.py` file must therefore
+  stay standard library only. A tool that needs a library fails at call time,
+  not at registration, so this cannot be caught by bootstrap.
+- Do not enable `use_venv` to give one tool a dependency. It changes execution
+  for every existing Confluence, Jira, GitLab, and document tool.
+- Rendering libraries, pandoc, and the `reference.docx` styling belong in the
+  documents container. Letta tools exchange document ids and download URLs
+  across that HTTP boundary and never handle document bytes beyond base64 input
+  to `document_convert`.
+- `documents` is the one service that uses `build:` instead of a published
+  digest. Its base image digest is pinned inside `documents/Dockerfile`, which
+  keeps the build reproducible; preserve that pin under the same rule as the
+  Compose image digests.
+- Gotenberg listens on port 3000 inside its own container. That is not a clash
+  with Open WebUI's published `3000:8080` mapping, and Gotenberg publishes no
+  port at all. Do not "fix" it.
+- Markdown is the source of truth for a document. Renders are disposable,
+  content-addressed artifacts. Do not add an editing path that mutates a
+  binary in place.
+- Download URLs are relayed verbatim by the documents worker and the office
+  manager. When changing either prompt, keep the verbatim-relay rule in both.
+- Revising a document requires the manager's `FETCH_DOCUMENT` step. The
+  engineering workers have no document tools, so removing that step makes any
+  "change the document" request fail with the worker asking for the file.
+- Download filenames are slugged from the title with Unicode letters and digits
+  preserved. Do not reintroduce ASCII folding: it empties a Persian or CJK
+  title and names the file after the raw document id.
+
 ## Editing guidelines
 
 - Preserve image digest pinning unless an upgrade is explicitly requested.
@@ -140,11 +178,11 @@ After changing Compose or its environment settings, run:
 
 ```sh
 docker compose config --quiet
-docker compose up -d
+docker compose up -d --build
 docker compose ps
 ```
 
-All four services should become healthy. Confirm the embedding configuration
+All six services should become healthy. Confirm the embedding configuration
 without displaying API keys:
 
 ```sh
@@ -156,6 +194,13 @@ docker compose exec -T open-webui python -c \
 ```
 
 Expected values are `openai` and `openai/text-embedding-3-small`.
+
+Confirm the documents service and its converter without displaying secrets:
+
+```sh
+docker compose exec -T documents curl -fsS http://localhost:8090/health
+docker compose exec -T documents curl -fsS http://gotenberg:3000/health
+```
 
 The LiteLLM endpoint must resolve and be reachable from inside the containers.
 If Letta reports that the default embedding handle is not registered, inspect
