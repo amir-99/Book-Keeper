@@ -61,6 +61,13 @@ services:
       CONFLUENCE_ACCESS_TOKEN: ${CONFLUENCE_ACCESS_TOKEN}
       CONFLUENCE_AUTH_MODE: ${CONFLUENCE_AUTH_MODE:-auto}
 
+      # Jira custom tools use the same credential-isolation model. The auth
+      # mode is explicit because some installations issue Bearer PATs while
+      # others provide raw or already-encoded Basic credentials.
+      JIRA_BASE_URL: ${JIRA_BASE_URL}
+      JIRA_ACCESS_TOKEN: ${JIRA_ACCESS_TOKEN}
+      JIRA_AUTH_MODE: ${JIRA_AUTH_MODE:-bearer}
+
     depends_on:
       postgres:
         condition: service_healthy
