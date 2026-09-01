@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -24,16 +25,20 @@ MEMORY_TOOL_TYPES = {
     "letta_sleeptime_core",
     "letta_voice_sleeptime_core",
 }
+MULTI_AGENT_TOOL_TYPE = "letta_multi_agent_core"
 AGENT_FIELDS = {
     "agent_type",
     "asset_type",
+    "custom_tools",
     "description",
     "embedding",
     "include_base_tools",
     "include_multi_agent_tools",
+    "message_buffer_autoclear",
     "mcp_tools",
     "memory_blocks",
     "model",
+    "model_settings",
     "name",
     "system",
     "tags",
@@ -116,7 +121,9 @@ def resolve_value(value: Any, environment: dict[str, str], source: Path) -> Any:
 
 def load_assets(
     environment: dict[str, str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+]:
     mcp_assets: list[dict[str, Any]] = []
     for path in sorted((ASSET_DIR / "mcp-servers").glob("*.json")):
         try:
@@ -141,6 +148,32 @@ def load_assets(
         asset["_source"] = path
         mcp_assets.append(asset)
 
+    tool_assets: list[dict[str, Any]] = []
+    for path in sorted((ASSET_DIR / "tools").glob("*.py")):
+        try:
+            source_code = path.read_text()
+            syntax_tree = ast.parse(source_code, filename=str(path))
+        except (OSError, SyntaxError) as exc:
+            raise BootstrapError(f"cannot read {path}: {exc}") from exc
+        functions = [
+            node
+            for node in syntax_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        if len(functions) != 1:
+            raise BootstrapError(
+                f"{path}: expected exactly one top-level tool function"
+            )
+        tool_assets.append(
+            {
+                "name": functions[0].name,
+                "source_code": source_code,
+                "source_type": "python",
+                "tags": ["letta-assets"],
+                "_source": path,
+            }
+        )
+
     agent_assets: list[dict[str, Any]] = []
     for path in sorted((ASSET_DIR / "agents").glob("*.json")):
         try:
@@ -157,9 +190,41 @@ def load_assets(
         for field in ("name", "system"):
             if not isinstance(asset.get(field), str) or not asset[field].strip():
                 raise BootstrapError(f"{path}: {field} must be a non-empty string")
-        for field in ("include_base_tools", "include_multi_agent_tools"):
+        for field in (
+            "include_base_tools",
+            "include_multi_agent_tools",
+            "message_buffer_autoclear",
+        ):
             if field in asset and not isinstance(asset[field], bool):
                 raise BootstrapError(f"{path}: {field} must be a boolean")
+
+        tags = asset.get("tags", [])
+        if (
+            not isinstance(tags, list)
+            or any(not isinstance(tag, str) or not tag for tag in tags)
+            or len(tags) != len(set(tags))
+        ):
+            raise BootstrapError(f"{path}: tags must be a unique array of non-empty strings")
+
+        model_settings = asset.get("model_settings")
+        if model_settings is not None:
+            if not isinstance(model_settings, dict):
+                raise BootstrapError(f"{path}: model_settings must be an object")
+            provider_type = model_settings.get("provider_type")
+            if not isinstance(provider_type, str) or not provider_type:
+                raise BootstrapError(
+                    f"{path}: model_settings.provider_type must be a non-empty string"
+                )
+
+        custom_tools = asset.get("custom_tools", [])
+        if (
+            not isinstance(custom_tools, list)
+            or any(not isinstance(name, str) or not name for name in custom_tools)
+            or len(custom_tools) != len(set(custom_tools))
+        ):
+            raise BootstrapError(
+                f"{path}: custom_tools must be a unique array of non-empty strings"
+            )
 
         memory_blocks = asset.get("memory_blocks", [])
         if not isinstance(memory_blocks, list) or not memory_blocks:
@@ -221,16 +286,21 @@ def load_assets(
         asset["_source"] = path
         agent_assets.append(asset)
 
-    if not mcp_assets and not agent_assets:
+    if not mcp_assets and not tool_assets and not agent_assets:
         raise BootstrapError(f"no assets found under {ASSET_DIR}")
 
     duplicate_mcp_names = _duplicates(asset["server_name"] for asset in mcp_assets)
     if duplicate_mcp_names:
         raise BootstrapError(f"duplicate MCP server asset(s): {', '.join(duplicate_mcp_names)}")
+    duplicate_tool_names = _duplicates(asset["name"] for asset in tool_assets)
+    if duplicate_tool_names:
+        raise BootstrapError(
+            f"duplicate custom tool asset(s): {', '.join(duplicate_tool_names)}"
+        )
     duplicate_agent_names = _duplicates(asset["name"] for asset in agent_assets)
     if duplicate_agent_names:
         raise BootstrapError(f"duplicate agent asset(s): {', '.join(duplicate_agent_names)}")
-    return mcp_assets, agent_assets
+    return mcp_assets, tool_assets, agent_assets
 
 
 def _duplicates(values: Any) -> list[str]:
@@ -247,11 +317,50 @@ def response_items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
     if isinstance(payload, dict):
-        for key in ("data", "agents", "blocks", "mcp_servers", "servers", "tools"):
+        for key in (
+            "data",
+            "agents",
+            "blocks",
+            "mcp_servers",
+            "models",
+            "servers",
+            "tools",
+        ):
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def validate_agent_model_handles(
+    api: "LettaApi", agent_assets: list[dict[str, Any]]
+) -> None:
+    model_handles = {
+        model["handle"]
+        for model in response_items(api.request("GET", "/v1/models/"))
+        if isinstance(model.get("handle"), str)
+    }
+    embedding_handles = {
+        model["handle"]
+        for model in response_items(api.request("GET", "/v1/models/embedding"))
+        if isinstance(model.get("handle"), str)
+    }
+
+    for asset in agent_assets:
+        source = asset["_source"]
+        model = asset.get("model")
+        if model is not None and model not in model_handles:
+            raise BootstrapError(f"{source}: model handle {model!r} is not registered")
+        embedding = asset.get("embedding")
+        if embedding is not None and embedding not in embedding_handles:
+            raise BootstrapError(
+                f"{source}: embedding handle {embedding!r} is not registered"
+            )
+
+
+def multi_agent_tools(api: "LettaApi") -> list[dict[str, Any]]:
+    tools = response_items(api.request("GET", "/v1/tools/?limit=200"))
+    return [tool for tool in tools if tool.get("tool_type") == MULTI_AGENT_TOOL_TYPE]
 
 
 class LettaApi:
@@ -336,6 +445,33 @@ def sync_mcp_server(
     return tools
 
 
+def sync_custom_tool(
+    api: LettaApi, asset: dict[str, Any], existing: list[dict[str, Any]]
+) -> dict[str, Any]:
+    name = asset["name"]
+    matches = [tool for tool in existing if tool.get("name") == name]
+    if len(matches) > 1:
+        raise BootstrapError(f"multiple Letta custom tools are named {name!r}")
+
+    payload = {
+        key: asset[key]
+        for key in ("source_code", "source_type", "tags")
+    }
+    synchronized = api.request("PUT", "/v1/tools/", payload)
+    tool_id = synchronized.get("id") if isinstance(synchronized, dict) else None
+    if not isinstance(tool_id, str) or not tool_id:
+        raise BootstrapError(f"Letta did not return an id for custom tool {name!r}")
+    synchronized_name = (
+        synchronized.get("name") if isinstance(synchronized, dict) else None
+    )
+    if synchronized_name != name:
+        raise BootstrapError(
+            f"Letta registered custom tool {synchronized_name!r}, expected {name!r}"
+        )
+    print(f"{name}: {'updated' if matches else 'created'} custom tool")
+    return synchronized
+
+
 def block_payload(block: dict[str, Any], *, include_value: bool) -> dict[str, Any]:
     payload = {
         key: value
@@ -343,6 +479,15 @@ def block_payload(block: dict[str, Any], *, include_value: bool) -> dict[str, An
         if key != "preserve_existing" and (include_value or key != "value")
     }
     return payload
+
+
+def attached_agent_tools(api: LettaApi, agent_id: str) -> list[dict[str, Any]]:
+    agent = api.request("GET", f"/v1/agents/{quote(agent_id, safe='')}")
+    if isinstance(agent, dict) and isinstance(agent.get("tools"), list):
+        return [tool for tool in agent["tools"] if isinstance(tool, dict)]
+    return response_items(
+        api.request("GET", f"/v1/agents/{quote(agent_id, safe='')}/tools")
+    )
 
 
 def sync_memory_blocks(
@@ -415,24 +560,74 @@ def resolve_agent_tools(
     return list(desired.values())
 
 
+def resolve_custom_tools(
+    asset: dict[str, Any], custom_tools_by_name: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    desired: list[dict[str, Any]] = []
+    for name in asset.get("custom_tools", []):
+        tool = custom_tools_by_name.get(name)
+        tool_id = tool.get("id") if isinstance(tool, dict) else None
+        if not isinstance(tool_id, str) or not tool_id:
+            source = asset["_source"]
+            raise BootstrapError(
+                f"{source}: custom tool {name!r} is not declared or synchronized"
+            )
+        desired.append(tool)
+    return desired
+
+
 def sync_agent(
     api: LettaApi,
     asset: dict[str, Any],
     existing: list[dict[str, Any]],
     mcp_tools_by_server: dict[str, list[dict[str, Any]]],
+    custom_tools_by_name: dict[str, dict[str, Any]],
+    available_multi_agent_tools: list[dict[str, Any]],
 ) -> None:
     name = asset["name"]
     matches = [agent for agent in existing if agent.get("name") == name]
     if len(matches) > 1:
         raise BootstrapError(f"multiple Letta agents are named {name!r}")
 
-    desired_tools = resolve_agent_tools(asset, mcp_tools_by_server)
+    desired_mcp_tools = resolve_agent_tools(asset, mcp_tools_by_server)
+    desired_custom_tools = resolve_custom_tools(asset, custom_tools_by_name)
+    desired_multi_agent_tools = (
+        available_multi_agent_tools
+        if asset.get("include_multi_agent_tools", False)
+        else []
+    )
+    if asset.get("include_multi_agent_tools", False) and not desired_multi_agent_tools:
+        raise BootstrapError(f"Letta has no {MULTI_AGENT_TOOL_TYPE!r} tools registered")
+
+    desired_create_tool_ids = sorted(
+        {
+            tool["id"]
+            for tool in [*desired_mcp_tools, *desired_custom_tools]
+            if isinstance(tool.get("id"), str)
+        }
+    )
     desired_tool_ids = sorted(
-        tool["id"] for tool in desired_tools if isinstance(tool.get("id"), str)
+        {
+            tool["id"]
+            for tool in [
+                *desired_mcp_tools,
+                *desired_custom_tools,
+                *desired_multi_agent_tools,
+            ]
+            if isinstance(tool.get("id"), str)
+        }
     )
     common_fields = {
         key: asset[key]
-        for key in ("description", "embedding", "model", "system", "tags")
+        for key in (
+            "description",
+            "embedding",
+            "message_buffer_autoclear",
+            "model",
+            "model_settings",
+            "system",
+            "tags",
+        )
         if key in asset
     }
 
@@ -454,7 +649,7 @@ def sync_agent(
                 block_payload(block, include_value=True)
                 for block in asset["memory_blocks"]
             ],
-            "tool_ids": desired_tool_ids,
+            "tool_ids": desired_create_tool_ids,
         }
         if "agent_type" in asset:
             create_payload["agent_type"] = asset["agent_type"]
@@ -467,9 +662,7 @@ def sync_agent(
     sync_memory_blocks(api, agent_id, asset["memory_blocks"])
 
     encoded_agent_id = quote(agent_id, safe="")
-    attached_tools = response_items(
-        api.request("GET", f"/v1/agents/{encoded_agent_id}/tools")
-    )
+    attached_tools = attached_agent_tools(api, agent_id)
     attached_ids = {
         tool["id"]
         for tool in attached_tools
@@ -484,9 +677,7 @@ def sync_agent(
                 {},
             )
 
-    attached_tools = response_items(
-        api.request("GET", f"/v1/agents/{encoded_agent_id}/tools")
-    )
+    attached_tools = attached_agent_tools(api, agent_id)
     attached_ids = {
         tool["id"]
         for tool in attached_tools
@@ -507,16 +698,32 @@ def sync_agent(
 
     mcp_tool_names = sorted(
         tool["name"]
-        for tool in desired_tools
+        for tool in desired_mcp_tools
         if tool.get("tool_type") == "external_mcp"
         and isinstance(tool.get("name"), str)
+    )
+    custom_tool_names = sorted(
+        tool["name"]
+        for tool in desired_custom_tools
+        if isinstance(tool.get("name"), str)
+    )
+    multi_agent_tool_names = sorted(
+        tool["name"]
+        for tool in desired_multi_agent_tools
+        if isinstance(tool.get("name"), str)
     )
     print(
         f"{name}: {action}; synchronized {len(asset['memory_blocks'])} memory "
         f"block(s), {len(memory_tool_names)} base memory tool(s), and "
-        f"{len(mcp_tool_names)} MCP tool(s)"
+        f"{len(mcp_tool_names)} MCP tool(s), "
+        f"{len(custom_tool_names)} custom tool(s), and "
+        f"{len(multi_agent_tool_names)} multi-agent tool(s)"
     )
-    for tool_name in mcp_tool_names:
+    for tool_name in [
+        *mcp_tool_names,
+        *custom_tool_names,
+        *multi_agent_tool_names,
+    ]:
         print(f"  - {tool_name}")
 
 
@@ -532,13 +739,14 @@ def main() -> int:
     if not api_key:
         raise BootstrapError("LETTA_API_KEY is unset")
 
-    mcp_assets, agent_assets = load_assets(environment)
+    mcp_assets, tool_assets, agent_assets = load_assets(environment)
     secrets = [
         value
         for name, value in environment.items()
         if value and SENSITIVE_NAME.search(name)
     ]
     api = LettaApi(base_url, api_key, secrets)
+    validate_agent_model_handles(api, agent_assets)
     existing_mcp_servers = response_items(api.request("GET", "/v1/mcp-servers/"))
     mcp_tools_by_server: dict[str, list[dict[str, Any]]] = {}
 
@@ -547,14 +755,23 @@ def main() -> int:
             api, asset, existing_mcp_servers
         )
 
+    existing_tools = response_items(api.request("GET", "/v1/tools/?limit=200"))
+    custom_tools_by_name: dict[str, dict[str, Any]] = {}
+    for asset in tool_assets:
+        synchronized = sync_custom_tool(api, asset, existing_tools)
+        custom_tools_by_name[asset["name"]] = synchronized
+
     if agent_assets:
         existing_agents = response_items(api.request("GET", "/v1/agents/?limit=1000"))
+        available_multi_agent_tools = multi_agent_tools(api)
         for asset in agent_assets:
             sync_agent(
                 api,
                 asset,
                 existing_agents,
                 mcp_tools_by_server,
+                custom_tools_by_name,
+                available_multi_agent_tools,
             )
     return 0
 

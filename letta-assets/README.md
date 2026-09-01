@@ -9,9 +9,15 @@ API and is safe to run repeatedly.
 - `mcp-servers/tavily.json`: Tavily's remote Streamable HTTP MCP server. Its
   credential-bearing URL is read from `TAVILY_MCP_URL`; no secret is stored in
   this directory.
-- `agents/engineering-assistant.json`: A concise engineering chat agent with
-  persistent user/project memory, Letta's base memory tools, and all declared
-  Tavily tools.
+- `agents/engineering-assistant.json`: The user-facing engineering router. It
+  preserves user/project memory and delegates each request to exactly one
+  difficulty-matched worker.
+- `agents/engineering-assistant-worker-{small,medium,large}.json`: Internal,
+  stateless workers backed by GPT-5.6 Luna, Terra, and Sol respectively. Their
+  `openwebui-hidden` tag keeps them out of the Open WebUI model picker.
+- `tools/route_to_agent_by_tags.py`: The router's credential-free source for
+  resolving exactly one local worker by tags and waiting for its reply. It
+  reads the local Letta API credential only from the tool environment.
 
 ## Bootstrap
 
@@ -27,6 +33,13 @@ the tools discovered from it, and then creates or updates agents by name. It
 also ensures each agent has its declared memory blocks and tool attachments.
 It requires Python 3.10+ and only uses the standard library.
 
+Before registering agents, bootstrap verifies that every declared model and
+embedding handle exists in Letta's synchronized provider catalog. For existing
+agents, it also reconciles requested multi-agent tools; disabling the manifest
+flag does not remove tools that may have been attached outside this workflow.
+Custom Python tools under `tools/` are upserted by function name before agents
+are synchronized, and agents attach them through the `custom_tools` name list.
+
 The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 `LETTA_BASE_URL` in the process environment or pass `--base-url`. Use
 `--env-file` if the secrets file is stored elsewhere.
@@ -34,6 +47,23 @@ The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 MCP tools are registered in Letta's tool catalog but are attached only to
 agents that explicitly declare them. Bootstrap adds missing declared tools but
 does not remove tools attached outside the asset workflow.
+
+The router selects workers with two tags: `engineering-assistant-worker` and
+one of `routing-tier-small`, `routing-tier-medium`, or `routing-tier-large`.
+Exactly one agent should carry each pair. The workers clear their message
+buffers after each delegated task, while the router remains the sole owner of
+durable conversational memory.
+
+Before invoking a worker, the router streams a concise, user-visible preamble
+inside `<think>...</think>`. Open WebUI renders it incrementally as a
+collapsible reasoning section while the worker runs. The worker then returns
+only the final answer. This preamble is an approach-and-checks summary; raw
+hidden chain-of-thought, prompts, memory, credentials, tool payloads, and
+routing details must not be exposed.
+
+The local routing tool requires `LETTA_API_KEY` in the Letta service
+environment so it can authenticate back to the localhost API. The value stays
+in the root `.env`; no credential is stored in a tool or agent manifest.
 
 For memory blocks, `preserve_existing` defaults to `true`. This lets bootstrap
 seed a writable block without erasing information the agent later learns. Set
@@ -66,3 +96,10 @@ and the exact tools it may use from each MCP server. MCP servers are always
 synchronized before agents, so manifests refer to stable server and tool names
 rather than generated Letta IDs. See `agents/engineering-assistant.json` for a
 complete example.
+
+## Adding a custom Python tool
+
+Add a Python file under `tools/` containing exactly one top-level function.
+Bootstrap upserts it by function name. Attach it to an agent by listing that
+name in the agent manifest's `custom_tools` array. Keep credentials out of the
+source and read them from the tool execution environment when required.

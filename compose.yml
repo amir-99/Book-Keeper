@@ -49,6 +49,9 @@ services:
       # Protect the API and encrypt provider secrets at rest.
       SECURE: "true"
       LETTA_SERVER_PASSWORD: ${LETTA_API_KEY}
+      # The local agent-to-agent routing tool authenticates back to this API
+      # with the client-facing variable name.
+      LETTA_API_KEY: ${LETTA_API_KEY}
       LETTA_ENCRYPTION_KEY: ${LETTA_ENCRYPTION_KEY}
 
     depends_on:

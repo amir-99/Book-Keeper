@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 UPSTREAM = urlsplit(os.environ.get("LETTA_UPSTREAM_URL", "http://letta:8283"))
 API_KEY = os.environ["LETTA_API_KEY"]
 PORT = int(os.environ.get("PROXY_PORT", "8081"))
+HIDDEN_MODEL_TAG = os.environ.get("LETTA_HIDDEN_MODEL_TAG", "openwebui-hidden")
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -94,6 +95,9 @@ class Handler(BaseHTTPRequestHandler):
             agents = payload.get("agents", payload.get("data", [])) if isinstance(payload, dict) else payload
             models = []
             for agent in agents if isinstance(agents, list) else []:
+                tags = agent.get("tags") or []
+                if isinstance(tags, list) and HIDDEN_MODEL_TAG in tags:
+                    continue
                 agent_id = agent.get("id")
                 if agent_id:
                     models.append(
