@@ -54,6 +54,60 @@ must not attempt to create it themselves.
 - Services bind to localhost by default. Do not expose them on all interfaces
   unless the user explicitly requests it and understands the access controls.
 
+## Letta assets
+
+`letta-assets/` is the source of truth for declarative resources registered
+with the local Letta API. Keep operator documentation in
+`letta-assets/README.md`, MCP server manifests in `letta-assets/mcp-servers/`,
+and registration logic in the executable `letta-assets/bootstrap` script.
+
+- Keep asset manifests declarative, reviewable, and free of credentials.
+- Reference secret values with whole-value environment placeholders such as
+  `${EXAMPLE_MCP_URL}`. Store the real value only in the root `.env` and add a
+  non-secret placeholder plus an explanatory comment to `.env.example`.
+- Treat MCP URLs containing API keys or tokens as credentials. Bootstrap and
+  validation output must never display them or raw API responses that may
+  contain them.
+- Keep `bootstrap` idempotent: identify MCP servers by `server_name`, update an
+  existing registration instead of creating a duplicate, refresh its tools,
+  and report only non-sensitive server/tool names and counts.
+- Use Letta's persistent `/v1/mcp-servers/` API with the current nested
+  `config` shape. For remote MCP endpoints, prefer `streamable_http` unless the
+  provider explicitly requires another transport.
+- Registering MCP tools does not authorize attaching them to every agent.
+  Attach tools only when the user identifies the target agent or explicitly
+  requests a broader attachment policy.
+- Do not make bootstrap delete Letta resources merely because a local manifest
+  was removed. Resource deletion requires an explicit user request.
+
+### Asset workflow
+
+When adding or changing an asset:
+
+1. Add or update its manifest under the appropriate `letta-assets/`
+   subdirectory and document any operator-facing behavior.
+2. Add required credential placeholders to `.env.example` and put real values
+   only in the ignored local `.env`.
+3. Validate Python and JSON files without displaying resolved secrets:
+
+   ```sh
+   python3 -m py_compile letta-assets/bootstrap
+   python3 -m json.tool letta-assets/mcp-servers/<server>.json >/dev/null
+   ```
+
+4. Ensure Letta is healthy, then apply the assets:
+
+   ```sh
+   docker compose up -d
+   ./letta-assets/bootstrap
+   ```
+
+5. Run `bootstrap` a second time after changing its registration logic or an
+   MCP manifest. The second run must update the same server without creating a
+   duplicate and must discover the expected tools.
+6. Run `docker compose ps` and the embedding checks below before handing off
+   changes that also affect Compose or environment settings.
+
 ## Editing guidelines
 
 - Preserve image digest pinning unless an upgrade is explicitly requested.

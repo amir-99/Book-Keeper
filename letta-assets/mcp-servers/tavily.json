@@ -1,0 +1,9 @@
+{
+  "asset_type": "mcp_server",
+  "server_name": "tavily",
+  "description": "Tavily web search, extract, crawl, map, and research tools.",
+  "config": {
+    "mcp_server_type": "streamable_http",
+    "server_url": "${TAVILY_MCP_URL}"
+  }
+}

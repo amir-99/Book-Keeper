@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Idempotently register declarative assets with a Letta server."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, urlopen
+
+
+ASSET_DIR = Path(__file__).resolve().parent
+REPO_DIR = ASSET_DIR.parent
+ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+SENSITIVE_NAME = re.compile(r"(?:KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL|URL)$", re.I)
+
+
+class BootstrapError(RuntimeError):
+    """An operator-facing bootstrap failure."""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Register the assets in this directory with Letta."
+    )
+    parser.add_argument(
+        "--base-url",
+        help="Letta API base URL (default: LETTA_BASE_URL or http://127.0.0.1:8283)",
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=REPO_DIR / ".env",
+        help="environment file containing Letta and asset secrets",
+    )
+    return parser.parse_args()
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    """Load a simple dotenv file without executing it as shell code."""
+    if not path.is_file():
+        raise BootstrapError(f"environment file not found: {path}")
+
+    values: dict[str, str] = {}
+    for line_number, raw_line in enumerate(path.read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            raise BootstrapError(f"invalid environment entry at {path}:{line_number}")
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise BootstrapError(f"invalid environment name at {path}:{line_number}")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        values[name] = value
+    return values
+
+
+def resolve_value(value: Any, environment: dict[str, str], source: Path) -> Any:
+    if isinstance(value, str):
+        match = ENV_REFERENCE.fullmatch(value)
+        if not match:
+            return value
+        name = match.group(1)
+        resolved = environment.get(name)
+        if not resolved:
+            raise BootstrapError(f"{source}: required environment variable {name} is unset")
+        return resolved
+    if isinstance(value, list):
+        return [resolve_value(item, environment, source) for item in value]
+    if isinstance(value, dict):
+        return {key: resolve_value(item, environment, source) for key, item in value.items()}
+    return value
+
+
+def load_assets(environment: dict[str, str]) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    for path in sorted((ASSET_DIR / "mcp-servers").glob("*.json")):
+        try:
+            raw_asset = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BootstrapError(f"cannot read {path}: {exc}") from exc
+
+        asset = resolve_value(raw_asset, environment, path)
+        if not isinstance(asset, dict) or asset.get("asset_type") != "mcp_server":
+            raise BootstrapError(f"{path}: expected asset_type=mcp_server")
+        if not isinstance(asset.get("server_name"), str) or not asset["server_name"]:
+            raise BootstrapError(f"{path}: server_name must be a non-empty string")
+        config = asset.get("config")
+        if not isinstance(config, dict):
+            raise BootstrapError(f"{path}: config must be an object")
+        if config.get("mcp_server_type") not in {"streamable_http", "sse", "stdio"}:
+            raise BootstrapError(f"{path}: unsupported mcp_server_type")
+        if config.get("mcp_server_type") in {"streamable_http", "sse"}:
+            server_url = config.get("server_url")
+            if not isinstance(server_url, str) or urlsplit(server_url).scheme not in {"http", "https"}:
+                raise BootstrapError(f"{path}: server_url must be an HTTP(S) URL")
+        assets.append(asset)
+
+    if not assets:
+        raise BootstrapError(f"no MCP server assets found under {ASSET_DIR / 'mcp-servers'}")
+    return assets
+
+
+def response_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "mcp_servers", "servers", "tools"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+class LettaApi:
+    def __init__(self, base_url: str, api_key: str, secrets: list[str]) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.secrets = sorted((secret for secret in secrets if secret), key=len, reverse=True)
+
+    def redact(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
+    def request(self, method: str, path: str, payload: Any | None = None) -> Any:
+        body = None if payload is None else json.dumps(payload).encode()
+        request = Request(
+            f"{self.base_url}/{path.lstrip('/')}",
+            data=body,
+            method=method,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "letta-assets-bootstrap/1.0",
+            },
+        )
+        try:
+            with urlopen(request, timeout=60) as response:
+                raw_body = response.read()
+        except HTTPError as exc:
+            details = exc.read().decode(errors="replace").strip()
+            message = f"Letta API returned HTTP {exc.code} for {method} {path}"
+            if details:
+                message += f": {details}"
+            raise BootstrapError(self.redact(message)) from exc
+        except URLError as exc:
+            reason = self.redact(str(exc.reason))
+            raise BootstrapError(
+                f"cannot reach Letta at {self.base_url}: {reason}; start it with docker compose up -d"
+            ) from exc
+
+        if not raw_body:
+            return None
+        try:
+            return json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise BootstrapError(f"Letta returned invalid JSON for {method} {path}") from exc
+
+
+def sync_mcp_server(api: LettaApi, asset: dict[str, Any], existing: list[dict[str, Any]]) -> list[str]:
+    server_name = asset["server_name"]
+    matches = [server for server in existing if server.get("server_name") == server_name]
+    if len(matches) > 1:
+        raise BootstrapError(f"multiple Letta MCP servers are named {server_name!r}")
+
+    payload = {"server_name": server_name, "config": asset["config"]}
+    if matches:
+        server_id = matches[0].get("id")
+        if not isinstance(server_id, str) or not server_id:
+            raise BootstrapError(f"existing MCP server {server_name!r} has no id")
+        api.request("PATCH", f"/v1/mcp-servers/{quote(server_id, safe='')}", payload)
+        action = "updated"
+    else:
+        created = api.request("POST", "/v1/mcp-servers/", payload)
+        server_id = created.get("id") if isinstance(created, dict) else None
+        if not isinstance(server_id, str) or not server_id:
+            raise BootstrapError(f"Letta did not return an id for MCP server {server_name!r}")
+        action = "created"
+
+    encoded_id = quote(server_id, safe="")
+    api.request("PATCH", f"/v1/mcp-servers/{encoded_id}/refresh", {})
+    tools_payload = api.request("GET", f"/v1/mcp-servers/{encoded_id}/tools")
+    tool_names = sorted(
+        tool["name"]
+        for tool in response_items(tools_payload)
+        if isinstance(tool.get("name"), str)
+    )
+    print(f"{server_name}: {action}; synchronized {len(tool_names)} tool(s)")
+    for name in tool_names:
+        print(f"  - {name}")
+    return tool_names
+
+
+def main() -> int:
+    args = parse_args()
+    file_environment = load_env_file(args.env_file.resolve())
+    environment = {**file_environment, **os.environ}
+
+    base_url = args.base_url or environment.get("LETTA_BASE_URL", "http://127.0.0.1:8283")
+    if urlsplit(base_url).scheme not in {"http", "https"}:
+        raise BootstrapError("LETTA_BASE_URL must be an HTTP(S) URL")
+    api_key = environment.get("LETTA_API_KEY")
+    if not api_key:
+        raise BootstrapError("LETTA_API_KEY is unset")
+
+    assets = load_assets(environment)
+    secrets = [
+        value
+        for name, value in environment.items()
+        if value and SENSITIVE_NAME.search(name)
+    ]
+    api = LettaApi(base_url, api_key, secrets)
+    existing = response_items(api.request("GET", "/v1/mcp-servers/"))
+
+    for asset in assets:
+        sync_mcp_server(api, asset, existing)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BootstrapError as exc:
+        print(f"bootstrap: error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
