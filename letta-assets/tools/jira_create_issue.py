@@ -3,7 +3,7 @@ def jira_create_issue(
     issue_type: str,
     summary: str,
     description: str = "",
-    extra_fields_json: str = "",
+    extra_fields: dict = None,
 ) -> str:
     """Create one Jira issue.
 
@@ -15,8 +15,8 @@ def jira_create_issue(
         issue_type: Jira issue type name, such as Task or Bug.
         summary: New issue summary.
         description: Optional plain-text Jira description.
-        extra_fields_json: Optional JSON object of additional Jira fields,
-            such as labels, components, priority, or custom fields.
+        extra_fields: Optional object of additional Jira fields, such as
+            parent, labels, components, priority, or custom fields.
 
     Returns:
         JSON identifying the created issue, or a JIRA_ERROR string.
@@ -36,14 +36,10 @@ def jira_create_issue(
         return "JIRA_ERROR: summary must be a non-empty string"
     if not isinstance(description, str):
         return "JIRA_ERROR: description must be a string"
-    if not isinstance(extra_fields_json, str):
-        return "JIRA_ERROR: extra_fields_json must be a string"
-    try:
-        extra_fields = json.loads(extra_fields_json) if extra_fields_json.strip() else {}
-    except json.JSONDecodeError:
-        return "JIRA_ERROR: extra_fields_json must be a valid JSON object"
+    if extra_fields is None:
+        extra_fields = {}
     if not isinstance(extra_fields, dict):
-        return "JIRA_ERROR: extra_fields_json must decode to a JSON object"
+        return "JIRA_ERROR: extra_fields must be an object"
 
     base_url = os.getenv("JIRA_BASE_URL", "").strip().rstrip("/")
     credential = os.getenv("JIRA_ACCESS_TOKEN", "")
@@ -95,6 +91,8 @@ def jira_create_issue(
     if not isinstance(payload, dict):
         return "JIRA_ERROR: Jira returned an invalid created issue"
     key = payload.get("key")
+    if not isinstance(key, str) or not key:
+        return "JIRA_ERROR: Jira did not return a key for the created issue"
     return json.dumps(
         {
             "id": payload.get("id"),

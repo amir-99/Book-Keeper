@@ -61,10 +61,13 @@ def jira_add_comment(issue_key: str, body: str) -> str:
 
     if not isinstance(payload, dict):
         return "JIRA_ERROR: Jira returned an invalid created comment"
+    comment_id = payload.get("id")
+    if not isinstance(comment_id, str) or not comment_id:
+        return "JIRA_ERROR: Jira did not return an id for the created comment"
     author = payload.get("author") if isinstance(payload.get("author"), dict) else {}
     return json.dumps(
         {
-            "id": payload.get("id"),
+            "id": comment_id,
             "issue_key": issue_key.strip(),
             "author": author.get("displayName") or author.get("name"),
             "created_at": payload.get("created"),

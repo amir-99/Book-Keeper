@@ -1,5 +1,5 @@
 def jira_transition_issue(
-    issue_key: str, transition_id: str, fields_json: str = ""
+    issue_key: str, transition_id: str, fields: dict = None
 ) -> str:
     """Move one Jira issue through an explicitly selected workflow transition.
 
@@ -9,7 +9,7 @@ def jira_transition_issue(
     Args:
         issue_key: Jira issue key, for example ENG-123.
         transition_id: Exact transition ID returned by jira_list_transitions.
-        fields_json: Optional JSON object for required transition-screen fields.
+        fields: Optional object containing required transition-screen fields.
 
     Returns:
         JSON confirming the requested transition, or a JIRA_ERROR string.
@@ -25,14 +25,10 @@ def jira_transition_issue(
         return "JIRA_ERROR: issue_key must be a non-empty string"
     if not isinstance(transition_id, str) or not transition_id.strip():
         return "JIRA_ERROR: transition_id must be a non-empty string"
-    if not isinstance(fields_json, str):
-        return "JIRA_ERROR: fields_json must be a string"
-    try:
-        fields = json.loads(fields_json) if fields_json.strip() else {}
-    except json.JSONDecodeError:
-        return "JIRA_ERROR: fields_json must be a valid JSON object"
+    if fields is None:
+        fields = {}
     if not isinstance(fields, dict):
-        return "JIRA_ERROR: fields_json must decode to a JSON object"
+        return "JIRA_ERROR: fields must be an object"
     if set(fields) & {"comment", "comments"}:
         return "JIRA_ERROR: use jira_add_comment for comments"
 

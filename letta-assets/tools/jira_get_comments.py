@@ -67,7 +67,9 @@ def jira_get_comments(
     except (URLError, OSError, ValueError, json.JSONDecodeError) as error:
         return f"JIRA_ERROR: unable to read comments ({type(error).__name__})"
 
-    raw_comments = payload.get("comments", []) if isinstance(payload, dict) else []
+    if not isinstance(payload, dict):
+        return "JIRA_ERROR: Jira returned an invalid comment response"
+    raw_comments = payload.get("comments", [])
     if not isinstance(raw_comments, list):
         return "JIRA_ERROR: Jira returned an invalid comment list"
 

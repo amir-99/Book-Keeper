@@ -75,7 +75,9 @@ def jira_search_issues(jql: str, limit: int = 20, start_at: int = 0) -> str:
     except (URLError, OSError, ValueError, json.JSONDecodeError) as error:
         return f"JIRA_ERROR: unable to search issues ({type(error).__name__})"
 
-    raw_issues = payload.get("issues", []) if isinstance(payload, dict) else []
+    if not isinstance(payload, dict):
+        return "JIRA_ERROR: Jira returned an invalid issue search response"
+    raw_issues = payload.get("issues", [])
     if not isinstance(raw_issues, list):
         return "JIRA_ERROR: Jira returned an invalid issue search result"
 

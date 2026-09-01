@@ -57,7 +57,9 @@ def jira_list_transitions(issue_key: str, include_fields: bool = True) -> str:
     except (URLError, OSError, ValueError, json.JSONDecodeError) as error:
         return f"JIRA_ERROR: unable to list transitions ({type(error).__name__})"
 
-    raw_transitions = payload.get("transitions", []) if isinstance(payload, dict) else []
+    if not isinstance(payload, dict):
+        return "JIRA_ERROR: Jira returned an invalid transition response"
+    raw_transitions = payload.get("transitions", [])
     if not isinstance(raw_transitions, list):
         return "JIRA_ERROR: Jira returned an invalid transition list"
 

@@ -74,7 +74,7 @@ def jira_list_projects(limit: int = 50, start_at: int = 0) -> str:
                 "project_type_key": item.get("projectTypeKey"),
                 "archived": item.get("archived"),
                 "lead": lead.get("displayName") or lead.get("name"),
-                "web_url": f"{base_url}/plugins/servlet/project-config/{key}/summary"
+                "web_url": f"{base_url}/browse/{key}"
                 if isinstance(key, str) and key
                 else "",
             }

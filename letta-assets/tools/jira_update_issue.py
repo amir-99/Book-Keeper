@@ -1,4 +1,4 @@
-def jira_update_issue(issue_key: str, fields_json: str, notify_users: bool = True) -> str:
+def jira_update_issue(issue_key: str, fields: dict, notify_users: bool = True) -> str:
     """Update fields on one existing Jira issue.
 
     Comments and workflow transitions have dedicated tools and must not be
@@ -6,8 +6,8 @@ def jira_update_issue(issue_key: str, fields_json: str, notify_users: bool = Tru
 
     Args:
         issue_key: Jira issue key, for example ENG-123.
-        fields_json: Non-empty JSON object mapping Jira field IDs or names to
-            their complete replacement values.
+        fields: Non-empty object mapping Jira field IDs or names to their
+            complete replacement values.
         notify_users: Whether Jira should send update notifications.
 
     Returns:
@@ -23,16 +23,10 @@ def jira_update_issue(issue_key: str, fields_json: str, notify_users: bool = Tru
 
     if not isinstance(issue_key, str) or not issue_key.strip():
         return "JIRA_ERROR: issue_key must be a non-empty string"
-    if not isinstance(fields_json, str) or not fields_json.strip():
-        return "JIRA_ERROR: fields_json must be a non-empty JSON object"
+    if not isinstance(fields, dict) or not fields:
+        return "JIRA_ERROR: fields must be a non-empty object"
     if not isinstance(notify_users, bool):
         return "JIRA_ERROR: notify_users must be a boolean"
-    try:
-        fields = json.loads(fields_json)
-    except json.JSONDecodeError:
-        return "JIRA_ERROR: fields_json must be a valid JSON object"
-    if not isinstance(fields, dict) or not fields:
-        return "JIRA_ERROR: fields_json must decode to a non-empty JSON object"
     forbidden = sorted(set(fields) & {"comment", "comments", "status"})
     if forbidden:
         return "JIRA_ERROR: use the dedicated comment or transition tool instead of updating: " + ", ".join(forbidden)

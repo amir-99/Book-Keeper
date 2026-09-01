@@ -74,13 +74,15 @@ def jira_get_issue(
     selected_fields = payload.get("fields", {})
     if not isinstance(selected_fields, dict):
         return "JIRA_ERROR: Jira returned invalid issue fields"
+    key = payload.get("key")
+    if not isinstance(key, str) or not key:
+        return "JIRA_ERROR: Jira returned an issue without a key"
     selected_fields = dict(selected_fields)
     truncated_fields = []
     for field_name, value in selected_fields.items():
         if isinstance(value, str) and len(value) > max_text_chars:
             selected_fields[field_name] = value[:max_text_chars] + "\n[TRUNCATED]"
             truncated_fields.append(field_name)
-    key = payload.get("key")
     return json.dumps(
         {
             "id": payload.get("id"),
