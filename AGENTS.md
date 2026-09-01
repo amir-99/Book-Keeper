@@ -18,6 +18,22 @@ The main deployment definition is `compose.yml`. PostgreSQL initialization is
 handled by `postgres-init.sh`, `letta-openai-proxy.py` implements the Letta
 adapter, and `documents/` holds the document service and its image build.
 
+## Reasoning preamble handling
+
+The agents emit their streaming preamble as a `<think>...</think>` block in
+ordinary assistant content, and Letta streams it one model token at a time, so
+the tags arrive split across chunks (`<th`, `ink`, `>I`). Open WebUI's own
+`<think>` detection forwards those raw chunks to the browser and only rebuilds
+the message into a reasoning block once the response is finalized, which leaves
+the tags visible for as long as the message is still streaming.
+
+`letta-openai-proxy.py` therefore parses the chat-completions stream instead of
+relaying it byte for byte, and moves the block onto `delta.reasoning_content`
+(`message.reasoning_content` when the caller asked for a non-streaming
+response). Open WebUI creates the reasoning item on the first token of that
+channel, so the thinking block renders live. Keep this translation in place if
+the adapter is reworked; a plain passthrough brings the raw tags back.
+
 ## Required embedding configuration
 
 Both applications must use the LiteLLM gateway configured by

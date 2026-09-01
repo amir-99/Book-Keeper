@@ -41,6 +41,134 @@ def _created_timestamp(value: object) -> int:
         return int(time.time())
 
 
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
+
+
+def _held_length(text: str, tag: str) -> int:
+    """Length of the trailing slice of ``text`` that could still grow into ``tag``."""
+    for size in range(min(len(text), len(tag) - 1), 0, -1):
+        if tag.startswith(text[-size:]):
+            return size
+    return 0
+
+
+class ReasoningSplitter:
+    """Route ``<think>...</think>`` from the content channel to ``reasoning_content``.
+
+    Letta streams the agent's `<think>` preamble as ordinary content, one model
+    token at a time, so `<think>` reaches Open WebUI split across chunks such as
+    `<th`, `ink`, `>I`. Open WebUI does detect the tag server-side, but the
+    events it forwards to the browser carry the raw chunk text, and it only
+    rebuilds the message into a reasoning block once the response is finalized.
+    The tags are therefore visible verbatim for the whole time the message is
+    still streaming. Its `delta.reasoning_content` path has no such gap: the
+    reasoning item is created on the first token and the browser is sent clean
+    reasoning deltas, so translating here renders a live thinking block.
+
+    Text buffered inside an unterminated block is flushed as reasoning, matching
+    what Open WebUI does with a `<think>` that never closes.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+        self._content_started = False
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        self._buffer += text
+        segments: list[tuple[str, str]] = []
+        while True:
+            tag = THINK_CLOSE if self._inside else THINK_OPEN
+            channel = "reasoning_content" if self._inside else "content"
+            position = self._buffer.find(tag)
+            if position != -1:
+                self._add(segments, channel, self._buffer[:position])
+                self._buffer = self._buffer[position + len(tag) :]
+                self._inside = not self._inside
+                continue
+            # Hold back a trailing partial tag so it is never emitted as content.
+            keep = len(self._buffer) - _held_length(self._buffer, tag)
+            self._add(segments, channel, self._buffer[:keep])
+            self._buffer = self._buffer[keep:]
+            return segments
+
+    def flush(self) -> list[tuple[str, str]]:
+        segments: list[tuple[str, str]] = []
+        self._add(segments, "reasoning_content" if self._inside else "content", self._buffer)
+        self._buffer = ""
+        return segments
+
+    def _add(self, segments: list[tuple[str, str]], channel: str, text: str) -> None:
+        if not text:
+            return
+        if channel == "content":
+            if not self._content_started:
+                # Drop the newline the model leaves between </think> and the answer.
+                text = text.lstrip()
+                if not text:
+                    return
+            self._content_started = True
+        segments.append((channel, text))
+
+
+def rewrite_chunk(chunk: dict, splitters: dict[object, ReasoningSplitter]) -> list[dict]:
+    """Expand one upstream chunk into chunks whose deltas use the right channel."""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return [chunk]
+
+    rewritten: list[tuple[int, list[tuple[str, str]]]] = []
+    for position, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        text = delta.get("content") if isinstance(delta, dict) else None
+        finished = choice.get("finish_reason") is not None
+        if not isinstance(text, str):
+            text = ""
+        if not text and not finished:
+            continue
+        splitter = splitters.setdefault(choice.get("index", position), ReasoningSplitter())
+        segments = splitter.feed(text) if text else []
+        if finished:
+            segments += splitter.flush()
+        rewritten.append((position, segments))
+
+    if not rewritten:
+        return [chunk]
+
+    events = []
+    count = max(max((len(segments) for _, segments in rewritten), default=1), 1)
+    for step in range(count):
+        last = step == count - 1
+        event = json.loads(json.dumps(chunk))
+        for position, choice in enumerate(event["choices"]):
+            if not isinstance(choice, dict):
+                continue
+            if not last:
+                choice["finish_reason"] = None
+            if step:
+                # role and any non-content delta fields belong to the first event only.
+                choice["delta"] = {}
+        for position, segments in rewritten:
+            choice = event["choices"][position]
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                delta = {}
+                choice["delta"] = delta
+            delta["content"] = None
+            if step < len(segments):
+                channel, text = segments[step]
+                delta[channel] = text
+        events.append(event)
+    return events
+
+
+def sse_event(chunk: dict) -> bytes:
+    return b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -134,7 +262,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_bytes(response.status, raw, response.getheader("Content-Type", "application/json"))
                 return True
 
+            splitter = ReasoningSplitter()
             content_parts: list[str] = []
+            reasoning_parts: list[str] = []
             completion_id = f"chatcmpl-{int(time.time() * 1000)}"
             for line in raw.splitlines():
                 if not line.startswith(b"data:"):
@@ -151,7 +281,16 @@ class Handler(BaseHTTPRequestHandler):
                 if choices:
                     text = (choices[0].get("delta") or {}).get("content")
                     if isinstance(text, str):
-                        content_parts.append(text)
+                        for channel, segment in splitter.feed(text):
+                            target = reasoning_parts if channel == "reasoning_content" else content_parts
+                            target.append(segment)
+            for channel, segment in splitter.flush():
+                target = reasoning_parts if channel == "reasoning_content" else content_parts
+                target.append(segment)
+
+            message = {"role": "assistant", "content": "".join(content_parts)}
+            if reasoning_parts:
+                message["reasoning_content"] = "".join(reasoning_parts)
 
             self._send_json(
                 200,
@@ -163,7 +302,7 @@ class Handler(BaseHTTPRequestHandler):
                     "choices": [
                         {
                             "index": 0,
-                            "message": {"role": "assistant", "content": "".join(content_parts)},
+                            "message": message,
                             "finish_reason": "stop",
                         }
                     ],
@@ -177,10 +316,69 @@ class Handler(BaseHTTPRequestHandler):
             if connection:
                 connection.close()
 
+    def _streaming_completion(self, body: bytes) -> bool:
+        try:
+            json.loads(body)
+        except json.JSONDecodeError:
+            return False
+
+        connection = None
+        try:
+            connection, response = self._open_upstream("POST", "/v1/chat/completions", body)
+            if response.status != 200:
+                raw = response.read()
+                self._send_bytes(response.status, raw, response.getheader("Content-Type", "application/json"))
+                return True
+
+            self.send_response(200)
+            self.send_header("Content-Type", response.getheader("Content-Type", "text/event-stream"))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            splitters: dict[object, ReasoningSplitter] = {}
+            for raw_line in response:
+                line = raw_line.strip()
+                if not line.startswith(b"data:"):
+                    self.wfile.write(raw_line)
+                    self.wfile.flush()
+                    continue
+
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    continue
+
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    self.wfile.write(raw_line)
+                    self.wfile.flush()
+                    continue
+
+                for event in rewrite_chunk(chunk, splitters) if isinstance(chunk, dict) else [chunk]:
+                    self.wfile.write(sse_event(event))
+                self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            return True
+        except OSError as error:
+            if not self.wfile.closed:
+                self._send_json(502, {"error": {"message": f"Letta request failed: {error}", "type": "upstream_error"}})
+            return True
+        finally:
+            if connection:
+                connection.close()
+            self.close_connection = True
+
     def _proxy(self) -> None:
         body = self._request_body()
-        if self.command == "POST" and self.path.rstrip("/") == "/v1/chat/completions" and self._non_streaming_completion(body):
-            return
+        if self.command == "POST" and self.path.rstrip("/") == "/v1/chat/completions":
+            if self._non_streaming_completion(body):
+                return
+            if self._streaming_completion(body):
+                return
 
         connection = None
         try:
