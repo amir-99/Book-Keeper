@@ -68,6 +68,11 @@ services:
       JIRA_ACCESS_TOKEN: ${JIRA_ACCESS_TOKEN}
       JIRA_AUTH_MODE: ${JIRA_AUTH_MODE:-bearer}
 
+      # GitLab custom tools authenticate directly to the configured
+      # self-managed instance. Credentials are never stored in tool source.
+      GITLAB_BASE_URL: ${GITLAB_BASE_URL}
+      GITLAB_ACCESS_TOKEN: ${GITLAB_ACCESS_TOKEN}
+
     depends_on:
       postgres:
         condition: service_healthy

@@ -36,6 +36,10 @@ API and is safe to run repeatedly.
 - `tools/jira_*.py`: Separate Jira activities for project discovery, issue
   search/read/create/update, comment read/write, and workflow transitions. They
   use only credential values injected into the Letta service environment.
+- `tools/gitlab_*.py`: Separate GitLab activities for project and repository
+  reads, issue and merge-request workflows, and CI pipeline inspection/control.
+  They authenticate directly to the configured GitLab instance with credentials
+  injected into the Letta service environment.
 
 ## Bootstrap
 
@@ -106,6 +110,36 @@ evidence, calls one engineering worker to analyze the request and evidence,
 and calls the Jira worker once more only when the original user explicitly
 requested a create, update, comment, or transition. The existing engineering
 assistant and tiered engineering workers remain unchanged.
+
+The GitLab activities are intentionally split into narrow tools:
+
+- Projects and repository: `gitlab_list_projects`,
+  `gitlab_list_repository_tree`, `gitlab_get_file`,
+  `gitlab_search_project`, `gitlab_list_commits`, and
+  `gitlab_get_commit_diff`.
+- Issues: `gitlab_list_issues`, `gitlab_get_issue`,
+  `gitlab_create_issue`, `gitlab_update_issue`, and
+  `gitlab_add_issue_note`.
+- Merge requests: `gitlab_list_merge_requests`,
+  `gitlab_get_merge_request`, `gitlab_get_merge_request_diffs`,
+  `gitlab_create_merge_request`, `gitlab_update_merge_request`, and
+  `gitlab_add_merge_request_note`.
+- CI/CD: `gitlab_list_pipelines`, `gitlab_get_pipeline`,
+  `gitlab_run_pipeline`, `gitlab_retry_pipeline`,
+  `gitlab_cancel_pipeline`, `gitlab_list_pipeline_jobs`, and
+  `gitlab_get_job_trace`.
+
+Set `GITLAB_BASE_URL` to the GitLab site root (without `/api/v4`) and put the
+personal, project, or group access token in `GITLAB_ACCESS_TOKEN` in the root
+`.env`. The tools send the token only in GitLab's `PRIVATE-TOKEN` header. Read
+operations bound large file, diff, description, and trace outputs. Create,
+update, comment, run, retry, and cancel operations are separate functions so an
+agent can receive only the mutations it needs.
+
+Bootstrap registers all GitLab functions in Letta's tool catalog but does not
+attach them automatically. Add only the required function names to a target
+agent's `custom_tools` array. No existing agent is granted GitLab access merely
+because the connection is configured.
 
 For cross-domain requests, the office manager gathers Confluence and Jira
 evidence independently before making exactly one engineering-worker call. It
