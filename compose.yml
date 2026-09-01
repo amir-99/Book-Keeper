@@ -1,0 +1,159 @@
+name: letta
+
+services:
+  postgres:
+    image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    container_name: letta-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      LETTA_DB_PASSWORD: ${LETTA_DB_PASSWORD}
+      OPENWEBUI_DB_PASSWORD: ${OPENWEBUI_DB_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-create-app-databases.sh:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+    networks:
+      - ai-net
+
+  letta:
+    image: letta/letta@sha256:aa66c3eeee13d2dfc40c650d709b550237ee31bfc91942a52fa488a13fa8c102
+    container_name: letta
+    restart: unless-stopped
+
+    ports:
+      - "${LETTA_BIND_ADDRESS:-127.0.0.1}:8283:8283"
+
+    environment:
+      # External PostgreSQL is the authoritative Letta database.
+      LETTA_PG_URI: postgresql://letta:${LETTA_DB_PASSWORD}@postgres:5432/letta
+
+      # OpenAI-compatible model gateway.
+      OPENAI_API_BASE: ${LITELLM_BASE_URL}
+      OPENAI_API_KEY: ${LITELLM_API_KEY}
+      # Letta uses provider/model handles; this becomes the default for new
+      # agents, folders, sources, and archives when none is specified.
+      LETTA_DEFAULT_EMBEDDING_HANDLE: openai/text-embedding-3-small
+
+      # Protect the API and encrypt provider secrets at rest.
+      SECURE: "true"
+      LETTA_SERVER_PASSWORD: ${LETTA_API_KEY}
+      LETTA_ENCRYPTION_KEY: ${LETTA_ENCRYPTION_KEY}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    volumes:
+      - letta_data:/root/.letta
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8283/v1/health/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+    networks:
+      - ai-net
+
+  # Letta's native /v1/models response is not OpenAI-shaped. This adapter
+  # exposes Letta agents as OpenAI models and forwards chat completions.
+  letta-openai:
+    image: letta/letta@sha256:aa66c3eeee13d2dfc40c650d709b550237ee31bfc91942a52fa488a13fa8c102
+    container_name: letta-openai
+    restart: unless-stopped
+    entrypoint: ["python", "/opt/letta-openai-proxy.py"]
+
+    environment:
+      LETTA_UPSTREAM_URL: http://letta:8283
+      LETTA_API_KEY: ${LETTA_API_KEY}
+      PROXY_PORT: "8081"
+
+    depends_on:
+      letta:
+        condition: service_healthy
+
+    volumes:
+      - ./letta-openai-proxy.py:/opt/letta-openai-proxy.py:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+    networks:
+      - ai-net
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui@sha256:8afd2d774834c618a75411b3491cdc5da7396dc464f56a160b937ff2992eb6e4
+    container_name: open-webui
+    restart: unless-stopped
+
+    ports:
+      - "${OPENWEBUI_BIND_ADDRESS:-127.0.0.1}:3000:8080"
+
+    environment:
+      # Open WebUI metadata and vector embeddings use its own database on
+      # the shared PostgreSQL server.
+      DATABASE_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD}@postgres:5432/openwebui
+      VECTOR_DB: pgvector
+      PGVECTOR_DB_URL: postgresql://openwebui:${OPENWEBUI_DB_PASSWORD}@postgres:5432/openwebui
+      PGVECTOR_CREATE_EXTENSION: "false"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      CORS_ALLOW_ORIGIN: ${OPENWEBUI_ORIGIN:-http://localhost:3000}
+
+      # Open WebUI talks to Letta through the compatibility adapter.
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URL: http://letta-openai:8081/v1
+      OPENAI_API_KEY: ${LETTA_API_KEY}
+      ENABLE_OLLAMA_API: "false"
+
+      # RAG embeddings go directly to the OpenAI-compatible LiteLLM gateway,
+      # independently of the Letta chat-completions adapter above.
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: openai/text-embedding-3-small
+      RAG_OPENAI_API_BASE_URL: ${LITELLM_BASE_URL}
+      RAG_OPENAI_API_KEY: ${LITELLM_API_KEY}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      letta-openai:
+        condition: service_healthy
+
+    volumes:
+      # PostgreSQL stores application records; this volume retains uploads,
+      # cache files, and other filesystem assets.
+      - openwebui_data:/app/backend/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+    networks:
+      - ai-net
+
+volumes:
+  postgres_data:
+  letta_data:
+  openwebui_data:
+
+networks:
+  ai-net:
+    driver: bridge
