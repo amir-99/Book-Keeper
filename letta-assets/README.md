@@ -9,6 +9,9 @@ API and is safe to run repeatedly.
 - `mcp-servers/tavily.json`: Tavily's remote Streamable HTTP MCP server. Its
   credential-bearing URL is read from `TAVILY_MCP_URL`; no secret is stored in
   this directory.
+- `agents/engineering-assistant.json`: A concise engineering chat agent with
+  persistent user/project memory, Letta's base memory tools, and all declared
+  Tavily tools.
 
 ## Bootstrap
 
@@ -20,16 +23,22 @@ docker compose up -d
 ```
 
 The script loads `.env`, creates or updates each MCP server by name, refreshes
-the tools discovered from it, and reports their names. It requires Python 3.10+
-and only uses the standard library.
+the tools discovered from it, and then creates or updates agents by name. It
+also ensures each agent has its declared memory blocks and tool attachments.
+It requires Python 3.10+ and only uses the standard library.
 
 The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 `LETTA_BASE_URL` in the process environment or pass `--base-url`. Use
 `--env-file` if the secrets file is stored elsewhere.
 
-MCP tools are registered in Letta's tool catalog but are not automatically
-attached to every agent. Attach the desired tools to an agent in Letta after
-bootstrapping.
+MCP tools are registered in Letta's tool catalog but are attached only to
+agents that explicitly declare them. Bootstrap adds missing declared tools but
+does not remove tools attached outside the asset workflow.
+
+For memory blocks, `preserve_existing` defaults to `true`. This lets bootstrap
+seed a writable block without erasing information the agent later learns. Set
+it to `false` only for blocks whose value should remain declarative, such as a
+read-only persona.
 
 ## Adding an MCP server
 
@@ -49,3 +58,11 @@ Add a JSON file under `mcp-servers/` with this shape:
 
 Put the referenced value in the root `.env`, add a placeholder to
 `.env.example`, and rerun `bootstrap`.
+
+## Adding an agent
+
+Add a JSON file under `agents/`. An agent declares its prompt, memory blocks,
+and the exact tools it may use from each MCP server. MCP servers are always
+synchronized before agents, so manifests refer to stable server and tool names
+rather than generated Letta IDs. See `agents/engineering-assistant.json` for a
+complete example.

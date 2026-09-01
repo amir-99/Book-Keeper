@@ -59,7 +59,8 @@ must not attempt to create it themselves.
 `letta-assets/` is the source of truth for declarative resources registered
 with the local Letta API. Keep operator documentation in
 `letta-assets/README.md`, MCP server manifests in `letta-assets/mcp-servers/`,
-and registration logic in the executable `letta-assets/bootstrap` script.
+agent manifests in `letta-assets/agents/`, and registration logic in the
+executable `letta-assets/bootstrap` script.
 
 - Keep asset manifests declarative, reviewable, and free of credentials.
 - Reference secret values with whole-value environment placeholders such as
@@ -77,6 +78,20 @@ and registration logic in the executable `letta-assets/bootstrap` script.
 - Registering MCP tools does not authorize attaching them to every agent.
   Attach tools only when the user identifies the target agent or explicitly
   requests a broader attachment policy.
+- Keep agent manifests declarative and identify agents by `name`. Synchronize
+  MCP servers before agents so agent manifests can reference stable MCP server
+  and tool names instead of generated Letta IDs.
+- Let Letta select the base tools appropriate for each agent type. Verify that
+  agents requesting base tools have compatible memory tools, and attach only
+  the explicitly declared MCP tools. Do not remove tools attached outside the
+  asset workflow.
+- Preserve learned memory on repeated bootstrap runs. For memory blocks,
+  `preserve_existing` defaults to `true`; use `false` only for values that must
+  remain declarative, such as a read-only persona. Never overwrite writable
+  user or project memory merely to reapply an asset.
+- Agent embedding handles must remain compatible with the required embedding
+  configuration above. Before registering an agent, confirm that its model and
+  embedding handles are present in Letta's synchronized provider catalog.
 - Do not make bootstrap delete Letta resources merely because a local manifest
   was removed. Resource deletion requires an explicit user request.
 
@@ -93,6 +108,7 @@ When adding or changing an asset:
    ```sh
    python3 -m py_compile letta-assets/bootstrap
    python3 -m json.tool letta-assets/mcp-servers/<server>.json >/dev/null
+   python3 -m json.tool letta-assets/agents/<agent>.json >/dev/null
    ```
 
 4. Ensure Letta is healthy, then apply the assets:
@@ -103,8 +119,9 @@ When adding or changing an asset:
    ```
 
 5. Run `bootstrap` a second time after changing its registration logic or an
-   MCP manifest. The second run must update the same server without creating a
-   duplicate and must discover the expected tools.
+   MCP/agent manifest. The second run must update the same server and agent
+   without creating duplicates, preserve learned memory, and discover or
+   attach the expected tools.
 6. Run `docker compose ps` and the embedding checks below before handing off
    changes that also affect Compose or environment settings.
 

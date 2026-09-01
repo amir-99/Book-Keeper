@@ -19,6 +19,36 @@ ASSET_DIR = Path(__file__).resolve().parent
 REPO_DIR = ASSET_DIR.parent
 ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 SENSITIVE_NAME = re.compile(r"(?:KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL|URL)$", re.I)
+MEMORY_TOOL_TYPES = {
+    "letta_memory_core",
+    "letta_sleeptime_core",
+    "letta_voice_sleeptime_core",
+}
+AGENT_FIELDS = {
+    "agent_type",
+    "asset_type",
+    "description",
+    "embedding",
+    "include_base_tools",
+    "include_multi_agent_tools",
+    "mcp_tools",
+    "memory_blocks",
+    "model",
+    "name",
+    "system",
+    "tags",
+}
+BLOCK_FIELDS = {
+    "description",
+    "hidden",
+    "label",
+    "limit",
+    "metadata",
+    "preserve_existing",
+    "read_only",
+    "tags",
+    "value",
+}
 
 
 class BootstrapError(RuntimeError):
@@ -84,8 +114,10 @@ def resolve_value(value: Any, environment: dict[str, str], source: Path) -> Any:
     return value
 
 
-def load_assets(environment: dict[str, str]) -> list[dict[str, Any]]:
-    assets: list[dict[str, Any]] = []
+def load_assets(
+    environment: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    mcp_assets: list[dict[str, Any]] = []
     for path in sorted((ASSET_DIR / "mcp-servers").glob("*.json")):
         try:
             raw_asset = json.loads(path.read_text())
@@ -106,18 +138,116 @@ def load_assets(environment: dict[str, str]) -> list[dict[str, Any]]:
             server_url = config.get("server_url")
             if not isinstance(server_url, str) or urlsplit(server_url).scheme not in {"http", "https"}:
                 raise BootstrapError(f"{path}: server_url must be an HTTP(S) URL")
-        assets.append(asset)
+        asset["_source"] = path
+        mcp_assets.append(asset)
 
-    if not assets:
-        raise BootstrapError(f"no MCP server assets found under {ASSET_DIR / 'mcp-servers'}")
-    return assets
+    agent_assets: list[dict[str, Any]] = []
+    for path in sorted((ASSET_DIR / "agents").glob("*.json")):
+        try:
+            raw_asset = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BootstrapError(f"cannot read {path}: {exc}") from exc
+
+        asset = resolve_value(raw_asset, environment, path)
+        if not isinstance(asset, dict) or asset.get("asset_type") != "agent":
+            raise BootstrapError(f"{path}: expected asset_type=agent")
+        unknown_fields = sorted(set(asset) - AGENT_FIELDS)
+        if unknown_fields:
+            raise BootstrapError(f"{path}: unsupported field(s): {', '.join(unknown_fields)}")
+        for field in ("name", "system"):
+            if not isinstance(asset.get(field), str) or not asset[field].strip():
+                raise BootstrapError(f"{path}: {field} must be a non-empty string")
+        for field in ("include_base_tools", "include_multi_agent_tools"):
+            if field in asset and not isinstance(asset[field], bool):
+                raise BootstrapError(f"{path}: {field} must be a boolean")
+
+        memory_blocks = asset.get("memory_blocks", [])
+        if not isinstance(memory_blocks, list) or not memory_blocks:
+            raise BootstrapError(f"{path}: memory_blocks must be a non-empty array")
+        block_labels: set[str] = set()
+        for block in memory_blocks:
+            if not isinstance(block, dict):
+                raise BootstrapError(f"{path}: each memory block must be an object")
+            unknown_block_fields = sorted(set(block) - BLOCK_FIELDS)
+            if unknown_block_fields:
+                raise BootstrapError(
+                    f"{path}: unsupported memory block field(s): "
+                    f"{', '.join(unknown_block_fields)}"
+                )
+            for field in ("label", "value"):
+                if not isinstance(block.get(field), str) or not block[field].strip():
+                    raise BootstrapError(
+                        f"{path}: memory block {field} must be a non-empty string"
+                    )
+            if block["label"] in block_labels:
+                raise BootstrapError(
+                    f"{path}: duplicate memory block label {block['label']!r}"
+                )
+            block_labels.add(block["label"])
+            if "preserve_existing" in block and not isinstance(
+                block["preserve_existing"], bool
+            ):
+                raise BootstrapError(
+                    f"{path}: preserve_existing must be a boolean"
+                )
+
+        mcp_tools = asset.get("mcp_tools", [])
+        if not isinstance(mcp_tools, list):
+            raise BootstrapError(f"{path}: mcp_tools must be an array")
+        for tool_group in mcp_tools:
+            if not isinstance(tool_group, dict):
+                raise BootstrapError(f"{path}: each mcp_tools entry must be an object")
+            if set(tool_group) != {"server_name", "tool_names"}:
+                raise BootstrapError(
+                    f"{path}: each mcp_tools entry requires only server_name and tool_names"
+                )
+            server_name = tool_group["server_name"]
+            tool_names = tool_group["tool_names"]
+            if not isinstance(server_name, str) or not server_name:
+                raise BootstrapError(f"{path}: MCP server_name must be a non-empty string")
+            if (
+                not isinstance(tool_names, list)
+                or not tool_names
+                or any(not isinstance(name, str) or not name for name in tool_names)
+            ):
+                raise BootstrapError(
+                    f"{path}: MCP tool_names must be a non-empty array of strings"
+                )
+            if len(tool_names) != len(set(tool_names)):
+                raise BootstrapError(
+                    f"{path}: duplicate tool name in MCP server {server_name!r}"
+                )
+
+        asset["_source"] = path
+        agent_assets.append(asset)
+
+    if not mcp_assets and not agent_assets:
+        raise BootstrapError(f"no assets found under {ASSET_DIR}")
+
+    duplicate_mcp_names = _duplicates(asset["server_name"] for asset in mcp_assets)
+    if duplicate_mcp_names:
+        raise BootstrapError(f"duplicate MCP server asset(s): {', '.join(duplicate_mcp_names)}")
+    duplicate_agent_names = _duplicates(asset["name"] for asset in agent_assets)
+    if duplicate_agent_names:
+        raise BootstrapError(f"duplicate agent asset(s): {', '.join(duplicate_agent_names)}")
+    return mcp_assets, agent_assets
+
+
+def _duplicates(values: Any) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return sorted(duplicates)
 
 
 def response_items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
     if isinstance(payload, dict):
-        for key in ("data", "mcp_servers", "servers", "tools"):
+        for key in ("data", "agents", "blocks", "mcp_servers", "servers", "tools"):
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -171,7 +301,9 @@ class LettaApi:
             raise BootstrapError(f"Letta returned invalid JSON for {method} {path}") from exc
 
 
-def sync_mcp_server(api: LettaApi, asset: dict[str, Any], existing: list[dict[str, Any]]) -> list[str]:
+def sync_mcp_server(
+    api: LettaApi, asset: dict[str, Any], existing: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     server_name = asset["server_name"]
     matches = [server for server in existing if server.get("server_name") == server_name]
     if len(matches) > 1:
@@ -194,15 +326,198 @@ def sync_mcp_server(api: LettaApi, asset: dict[str, Any], existing: list[dict[st
     encoded_id = quote(server_id, safe="")
     api.request("PATCH", f"/v1/mcp-servers/{encoded_id}/refresh", {})
     tools_payload = api.request("GET", f"/v1/mcp-servers/{encoded_id}/tools")
+    tools = response_items(tools_payload)
     tool_names = sorted(
-        tool["name"]
-        for tool in response_items(tools_payload)
-        if isinstance(tool.get("name"), str)
+        tool["name"] for tool in tools if isinstance(tool.get("name"), str)
     )
     print(f"{server_name}: {action}; synchronized {len(tool_names)} tool(s)")
     for name in tool_names:
         print(f"  - {name}")
-    return tool_names
+    return tools
+
+
+def block_payload(block: dict[str, Any], *, include_value: bool) -> dict[str, Any]:
+    payload = {
+        key: value
+        for key, value in block.items()
+        if key != "preserve_existing" and (include_value or key != "value")
+    }
+    return payload
+
+
+def sync_memory_blocks(
+    api: LettaApi, agent_id: str, memory_blocks: list[dict[str, Any]]
+) -> None:
+    encoded_agent_id = quote(agent_id, safe="")
+    existing = response_items(
+        api.request("GET", f"/v1/agents/{encoded_agent_id}/core-memory/blocks")
+    )
+    for block in memory_blocks:
+        label = block["label"]
+        matches = [item for item in existing if item.get("label") == label]
+        if len(matches) > 1:
+            raise BootstrapError(
+                f"agent {agent_id!r} has multiple memory blocks labeled {label!r}"
+            )
+        if matches:
+            preserve = block.get("preserve_existing", True)
+            api.request(
+                "PATCH",
+                f"/v1/agents/{encoded_agent_id}/core-memory/blocks/"
+                f"{quote(label, safe='')}",
+                block_payload(block, include_value=not preserve),
+            )
+            continue
+
+        created = api.request(
+            "POST", "/v1/blocks/", block_payload(block, include_value=True)
+        )
+        block_id = created.get("id") if isinstance(created, dict) else None
+        if not isinstance(block_id, str) or not block_id:
+            raise BootstrapError(
+                f"Letta did not return an id for memory block {label!r}"
+            )
+        api.request(
+            "PATCH",
+            f"/v1/agents/{encoded_agent_id}/core-memory/blocks/attach/"
+            f"{quote(block_id, safe='')}",
+            {},
+        )
+
+
+def resolve_agent_tools(
+    asset: dict[str, Any],
+    mcp_tools_by_server: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    desired: dict[str, dict[str, Any]] = {}
+    for tool_group in asset.get("mcp_tools", []):
+        server_name = tool_group["server_name"]
+        server_tools = mcp_tools_by_server.get(server_name)
+        if server_tools is None:
+            source = asset["_source"]
+            raise BootstrapError(
+                f"{source}: MCP server {server_name!r} is not declared or synchronized"
+            )
+        tools_by_name = {
+            tool.get("name"): tool
+            for tool in server_tools
+            if isinstance(tool.get("name"), str)
+        }
+        for tool_name in tool_group["tool_names"]:
+            tool = tools_by_name.get(tool_name)
+            tool_id = tool.get("id") if isinstance(tool, dict) else None
+            if not isinstance(tool_id, str) or not tool_id:
+                source = asset["_source"]
+                raise BootstrapError(
+                    f"{source}: MCP server {server_name!r} has no tool {tool_name!r}"
+                )
+            desired[tool_id] = tool
+    return list(desired.values())
+
+
+def sync_agent(
+    api: LettaApi,
+    asset: dict[str, Any],
+    existing: list[dict[str, Any]],
+    mcp_tools_by_server: dict[str, list[dict[str, Any]]],
+) -> None:
+    name = asset["name"]
+    matches = [agent for agent in existing if agent.get("name") == name]
+    if len(matches) > 1:
+        raise BootstrapError(f"multiple Letta agents are named {name!r}")
+
+    desired_tools = resolve_agent_tools(asset, mcp_tools_by_server)
+    desired_tool_ids = sorted(
+        tool["id"] for tool in desired_tools if isinstance(tool.get("id"), str)
+    )
+    common_fields = {
+        key: asset[key]
+        for key in ("description", "embedding", "model", "system", "tags")
+        if key in asset
+    }
+
+    if matches:
+        agent_id = matches[0].get("id")
+        if not isinstance(agent_id, str) or not agent_id:
+            raise BootstrapError(f"existing agent {name!r} has no id")
+        api.request(
+            "PATCH", f"/v1/agents/{quote(agent_id, safe='')}", common_fields
+        )
+        action = "updated"
+    else:
+        create_payload = {
+            "name": name,
+            **common_fields,
+            "include_base_tools": asset.get("include_base_tools", True),
+            "include_multi_agent_tools": asset.get("include_multi_agent_tools", False),
+            "memory_blocks": [
+                block_payload(block, include_value=True)
+                for block in asset["memory_blocks"]
+            ],
+            "tool_ids": desired_tool_ids,
+        }
+        if "agent_type" in asset:
+            create_payload["agent_type"] = asset["agent_type"]
+        created = api.request("POST", "/v1/agents/", create_payload)
+        agent_id = created.get("id") if isinstance(created, dict) else None
+        if not isinstance(agent_id, str) or not agent_id:
+            raise BootstrapError(f"Letta did not return an id for agent {name!r}")
+        action = "created"
+
+    sync_memory_blocks(api, agent_id, asset["memory_blocks"])
+
+    encoded_agent_id = quote(agent_id, safe="")
+    attached_tools = response_items(
+        api.request("GET", f"/v1/agents/{encoded_agent_id}/tools")
+    )
+    attached_ids = {
+        tool["id"]
+        for tool in attached_tools
+        if isinstance(tool.get("id"), str)
+    }
+    for tool_id in desired_tool_ids:
+        if tool_id not in attached_ids:
+            api.request(
+                "PATCH",
+                f"/v1/agents/{encoded_agent_id}/tools/attach/"
+                f"{quote(tool_id, safe='')}",
+                {},
+            )
+
+    attached_tools = response_items(
+        api.request("GET", f"/v1/agents/{encoded_agent_id}/tools")
+    )
+    attached_ids = {
+        tool["id"]
+        for tool in attached_tools
+        if isinstance(tool.get("id"), str)
+    }
+    missing_ids = set(desired_tool_ids) - attached_ids
+    if missing_ids:
+        raise BootstrapError(f"agent {name!r} is missing {len(missing_ids)} requested tool(s)")
+
+    memory_tool_names = sorted(
+        tool["name"]
+        for tool in attached_tools
+        if tool.get("tool_type") in MEMORY_TOOL_TYPES
+        and isinstance(tool.get("name"), str)
+    )
+    if asset.get("include_base_tools", True) and not memory_tool_names:
+        raise BootstrapError(f"agent {name!r} has no attached base memory tools")
+
+    mcp_tool_names = sorted(
+        tool["name"]
+        for tool in desired_tools
+        if tool.get("tool_type") == "external_mcp"
+        and isinstance(tool.get("name"), str)
+    )
+    print(
+        f"{name}: {action}; synchronized {len(asset['memory_blocks'])} memory "
+        f"block(s), {len(memory_tool_names)} base memory tool(s), and "
+        f"{len(mcp_tool_names)} MCP tool(s)"
+    )
+    for tool_name in mcp_tool_names:
+        print(f"  - {tool_name}")
 
 
 def main() -> int:
@@ -217,17 +532,30 @@ def main() -> int:
     if not api_key:
         raise BootstrapError("LETTA_API_KEY is unset")
 
-    assets = load_assets(environment)
+    mcp_assets, agent_assets = load_assets(environment)
     secrets = [
         value
         for name, value in environment.items()
         if value and SENSITIVE_NAME.search(name)
     ]
     api = LettaApi(base_url, api_key, secrets)
-    existing = response_items(api.request("GET", "/v1/mcp-servers/"))
+    existing_mcp_servers = response_items(api.request("GET", "/v1/mcp-servers/"))
+    mcp_tools_by_server: dict[str, list[dict[str, Any]]] = {}
 
-    for asset in assets:
-        sync_mcp_server(api, asset, existing)
+    for asset in mcp_assets:
+        mcp_tools_by_server[asset["server_name"]] = sync_mcp_server(
+            api, asset, existing_mcp_servers
+        )
+
+    if agent_assets:
+        existing_agents = response_items(api.request("GET", "/v1/agents/?limit=1000"))
+        for asset in agent_assets:
+            sync_agent(
+                api,
+                asset,
+                existing_agents,
+                mcp_tools_by_server,
+            )
     return 0
 
 
