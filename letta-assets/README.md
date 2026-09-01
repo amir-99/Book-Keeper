@@ -190,6 +190,18 @@ only the final answer. This preamble is an approach-and-checks summary; raw
 hidden chain-of-thought, prompts, memory, credentials, tool payloads, and
 routing details must not be exposed.
 
+The two user-facing managers and all three engineering workers also carry a
+read-only `frontend_rendering` memory block. It tells them to default to clear
+Markdown and to use Open WebUI's richer renderers only when they materially
+improve the answer: Mermaid for relationships and process diagrams,
+Vega-Lite with inline data for quantitative charts, KaTeX for math, Markdown
+alerts and collapsible details for exceptional supporting material,
+`:::writing` blocks for copy-ready drafts, and self-contained HTML or SVG
+Artifacts when the user explicitly requests an interactive or standalone
+visual. Managers preserve valid worker-generated rendering markup. Diagrams
+and charts include a short textual takeaway so answers remain useful in other
+clients or when rendering fails.
+
 The local routing tool requires `LETTA_API_KEY` in the Letta service
 environment so it can authenticate back to the localhost API. The value stays
 in the root `.env`; no credential is stored in a tool or agent manifest.

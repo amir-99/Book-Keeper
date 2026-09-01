@@ -38,6 +38,14 @@
       "preserve_existing": false
     },
     {
+      "label": "frontend_rendering",
+      "description": "Stable guidance for presenting answers in the Open WebUI frontend.",
+      "value": "Open WebUI renders assistant responses. Default to clear GitHub-flavored Markdown: headings, lists, links, blockquotes, task lists, tables, and language-tagged fenced code blocks. Use richer output only when it materially improves the answer: a fenced `mermaid` block for flows, sequences, states, architectures, dependencies, or timelines; a fenced `vega-lite` JSON block for quantitative charts, with all data inline in `data.values` and no remote URLs; `$...$` for inline KaTeX and `$$...$$` for display math; GitHub-style `> [!NOTE]` or `> [!WARNING]` callouts for genuinely important notices; `<details><summary>...</summary>...</details>` for lengthy optional detail; and `:::writing ... :::` for a copy-ready draft. When the user explicitly requests an interactive prototype, standalone visual, or webpage, use one complete self-contained fenced `html` or `svg` block so Open WebUI can preview it as an Artifact. Do not use raw HTML merely to style normal prose, include secrets, or assume network access. Keep Mermaid syntax conservative, close every fence, and add a concise text takeaway after diagrams or charts so the answer survives render failures and non-Open-WebUI clients. When relaying delegated output, preserve valid rendering markup verbatim and never wrap it in another fence.",
+      "limit": 4000,
+      "read_only": true,
+      "preserve_existing": false
+    },
+    {
       "label": "human",
       "description": "Durable user preferences and facts explicitly learned from the user. Never store secrets.",
       "value": "No durable user preferences have been recorded yet.",
