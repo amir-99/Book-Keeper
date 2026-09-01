@@ -15,6 +15,14 @@ API and is safe to run repeatedly.
 - `agents/engineering-assistant-worker-{small,medium,large}.json`: Internal,
   stateless workers backed by GPT-5.6 Luna, Terra, and Sol respectively. Their
   `openwebui-hidden` tag keeps them out of the Open WebUI model picker.
+- `agents/office-agent.json`: A user-facing copy of the engineering manager
+  with bounded Confluence orchestration. It gathers Confluence evidence, sends
+  the evidence and original question to one difficulty-matched engineering
+  worker, and optionally sends an explicitly authorized mutation back to the
+  Confluence specialist.
+- `agents/office-agent-confluence-worker.json`: A hidden, stateless Confluence
+  specialist backed by Gemini 3.7 Flash. It separates evidence gathering from
+  explicitly authorized create, update, and comment operations.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
@@ -62,6 +70,13 @@ Page and comment bodies use Confluence's `storage` XHTML representation.
 Bootstrap registers these tools in Letta's catalog but does not attach them to
 an agent automatically. Add only the required function names to that agent's
 `custom_tools` array.
+
+The office agent is the declared target for all five tools through its hidden
+Confluence worker. The existing engineering assistant and tiered engineering
+workers remain unchanged. The office manager itself has no Confluence tools;
+it calls the specialist once to gather evidence, calls one engineering worker
+to analyze the original question with that evidence, and calls the specialist
+once more only when the original user explicitly requested a mutation.
 
 The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 `LETTA_BASE_URL` in the process environment or pass `--base-url`. Use
