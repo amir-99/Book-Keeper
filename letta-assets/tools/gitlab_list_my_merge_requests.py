@@ -8,8 +8,10 @@ def gitlab_list_my_merge_requests(
 
     This instance-wide lookup avoids enumerating projects. By default it
     combines merge requests created by the current user, assigned to the
-    current user, and awaiting the current user's review. Overlapping merge
-    requests are returned once with every matching relationship.
+    current user, and awaiting the current user's review. The reviewer lookup
+    resolves the authenticated user ID for compatibility with GitLab versions
+    that predate the ``reviews_for_me`` scope. Overlapping merge requests are
+    returned once with every matching relationship.
 
     Args:
         state: opened, closed, locked, merged, or all.
@@ -68,13 +70,33 @@ def gitlab_list_my_merge_requests(
     max_pages_per_relationship = 100
     per_page = 100
 
+    current_user_id = None
+    if "reviews_for_me" in relationship_values:
+        user_request = Request(
+            f"{base_url}/api/v4/user",
+            headers={
+                "Accept": "application/json",
+                "PRIVATE-TOKEN": token,
+                "User-Agent": "letta-gitlab-tools/1.0",
+            },
+        )
+        try:
+            with urlopen(user_request, timeout=30) as response:
+                user_payload = json.loads(response.read())
+        except HTTPError as error:
+            return f"GITLAB_ERROR: GitLab returned HTTP {error.code} while resolving the authenticated reviewer"
+        except (URLError, OSError, ValueError, json.JSONDecodeError) as error:
+            return f"GITLAB_ERROR: unable to resolve the authenticated reviewer ({type(error).__name__})"
+        if not isinstance(user_payload, dict) or not isinstance(user_payload.get("id"), int):
+            return "GITLAB_ERROR: GitLab returned an invalid authenticated user"
+        current_user_id = user_payload["id"]
+
     for relationship in relationship_values:
         page = 1
         relationship_count = 0
         pagination_complete = False
         while page <= max_pages_per_relationship:
             params = {
-                "scope": relationship,
                 "state": state,
                 "non_archived": "true",
                 "order_by": "updated_at",
@@ -82,6 +104,11 @@ def gitlab_list_my_merge_requests(
                 "per_page": per_page,
                 "page": page,
             }
+            if relationship == "reviews_for_me":
+                params["scope"] = "all"
+                params["reviewer_id"] = current_user_id
+            else:
+                params["scope"] = relationship
             if search.strip():
                 params["search"] = search.strip()
             request = Request(

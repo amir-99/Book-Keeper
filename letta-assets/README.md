@@ -149,7 +149,9 @@ agent can receive only the mutations it needs.
 instead of enumerating projects. One invocation queries merge requests created
 by the authenticated user, assigned to the authenticated user, and awaiting
 that user's review; it paginates each scope internally, deduplicates overlaps,
-and returns per-scope counts plus the unique total. The project-scoped
+and returns per-scope counts plus the unique total. Reviewer lookup resolves
+the authenticated user and uses the global reviewer filter, so it also works
+on GitLab versions that predate the `reviews_for_me` scope. The project-scoped
 `gitlab_list_merge_requests` remains available for requests limited to an exact
 project.
 
