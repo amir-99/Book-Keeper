@@ -18,6 +18,10 @@ API and is safe to run repeatedly.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
+- `tools/confluence_*.py`: Separate Confluence activities for searching and
+  reading pages, creating and updating pages, and adding comments. They read
+  the site URL and credential from the Letta service environment; no secret is
+  stored in tool source.
 
 ## Bootstrap
 
@@ -39,6 +43,25 @@ agents, it also reconciles requested multi-agent tools; disabling the manifest
 flag does not remove tools that may have been attached outside this workflow.
 Custom Python tools under `tools/` are upserted by function name before agents
 are synchronized, and agents attach them through the `custom_tools` name list.
+
+The Confluence tools deliberately separate read and write activities so an
+agent manifest can receive only the permissions it needs:
+
+- `confluence_search_pages`: search content with Confluence Query Language.
+- `confluence_get_page`: read one page and a selected body representation.
+- `confluence_create_page`: create a page, optionally below a parent page.
+- `confluence_update_page`: replace a page body/title using optimistic versioning.
+- `confluence_add_comment`: add a storage-format comment to a page.
+
+Set `CONFLUENCE_BASE_URL` and `CONFLUENCE_ACCESS_TOKEN` in the root `.env`.
+`CONFLUENCE_AUTH_MODE` defaults to `auto`: a `user:token` value uses Basic
+authentication and an opaque personal access token uses Bearer authentication.
+Set it explicitly to `basic` or `bearer` only when auto-detection is unsuitable.
+Page and comment bodies use Confluence's `storage` XHTML representation.
+
+Bootstrap registers these tools in Letta's catalog but does not attach them to
+an agent automatically. Add only the required function names to that agent's
+`custom_tools` array.
 
 The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 `LETTA_BASE_URL` in the process environment or pass `--base-url`. Use

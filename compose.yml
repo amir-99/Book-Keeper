@@ -54,6 +54,13 @@ services:
       LETTA_API_KEY: ${LETTA_API_KEY}
       LETTA_ENCRYPTION_KEY: ${LETTA_ENCRYPTION_KEY}
 
+      # Confluence custom tools read credentials only from the Letta process
+      # environment. auto uses Basic auth for user:token values and Bearer
+      # auth for opaque personal access tokens.
+      CONFLUENCE_BASE_URL: ${CONFLUENCE_BASE_URL}
+      CONFLUENCE_ACCESS_TOKEN: ${CONFLUENCE_ACCESS_TOKEN}
+      CONFLUENCE_AUTH_MODE: ${CONFLUENCE_AUTH_MODE:-auto}
+
     depends_on:
       postgres:
         condition: service_healthy
