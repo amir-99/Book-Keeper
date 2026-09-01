@@ -16,16 +16,24 @@ API and is safe to run repeatedly.
   stateless workers backed by GPT-5.6 Luna, Terra, and Sol respectively. Their
   `openwebui-hidden` tag keeps them out of the Open WebUI model picker.
 - `agents/office-agent.json`: A user-facing copy of the engineering manager
-  with bounded Confluence and Jira orchestration. It gathers evidence from the
-  required domain specialists, sends the evidence and original question to one
-  difficulty-matched engineering worker, and optionally sends explicitly
-  authorized mutations back to the matching specialists.
+  with bounded Confluence, Jira, and GitLab orchestration. It gathers evidence
+  from only the required domain specialists, sends the evidence and original
+  question to one difficulty-matched engineering worker, and optionally sends
+  explicitly authorized mutations back to the matching specialists.
 - `agents/office-agent-confluence-worker.json`: A hidden, stateless Confluence
   specialist backed by Gemini 3.7 Flash. It separates evidence gathering from
   explicitly authorized create, update, and comment operations.
 - `agents/office-agent-jira-worker.json`: A hidden, stateless Jira specialist
   backed by Gemini 3.7 Flash. It separates issue evidence gathering from
   explicitly authorized create, update, comment, and transition operations.
+- `agents/office-agent-gitlab-code-worker.json`: A hidden, stateless GitLab
+  repository and merge-request specialist. Its 13 tools cover bounded code,
+  commit, diff, and merge-request workflows but cannot merge or edit files.
+- `agents/office-agent-gitlab-issues-worker.json`: A hidden, stateless GitLab
+  issue specialist with five issue discovery, read, create, update, and note
+  tools.
+- `agents/office-agent-gitlab-ci-worker.json`: A hidden, stateless GitLab CI
+  specialist with seven pipeline, job, trace, run, retry, and cancel tools.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
@@ -120,7 +128,8 @@ The GitLab activities are intentionally split into narrow tools:
 - Issues: `gitlab_list_issues`, `gitlab_get_issue`,
   `gitlab_create_issue`, `gitlab_update_issue`, and
   `gitlab_add_issue_note`.
-- Merge requests: `gitlab_list_merge_requests`,
+- Merge requests: `gitlab_list_my_merge_requests`,
+  `gitlab_list_merge_requests`,
   `gitlab_get_merge_request`, `gitlab_get_merge_request_diffs`,
   `gitlab_create_merge_request`, `gitlab_update_merge_request`, and
   `gitlab_add_merge_request_note`.
@@ -136,15 +145,27 @@ operations bound large file, diff, description, and trace outputs. Create,
 update, comment, run, retry, and cancel operations are separate functions so an
 agent can receive only the mutations it needs.
 
-Bootstrap registers all GitLab functions in Letta's tool catalog but does not
-attach them automatically. Add only the required function names to a target
-agent's `custom_tools` array. No existing agent is granted GitLab access merely
-because the connection is configured.
+`gitlab_list_my_merge_requests` uses GitLab's instance-wide merge-request API
+instead of enumerating projects. One invocation queries merge requests created
+by the authenticated user, assigned to the authenticated user, and awaiting
+that user's review; it paginates each scope internally, deduplicates overlaps,
+and returns per-scope counts plus the unique total. The project-scoped
+`gitlab_list_merge_requests` remains available for requests limited to an exact
+project.
 
-For cross-domain requests, the office manager gathers Confluence and Jira
-evidence independently before making exactly one engineering-worker call. It
-can then invoke each relevant specialist once more for explicitly authorized
-writes; authorization for one system never authorizes a write to the other.
+Bootstrap registers all GitLab functions and attaches them only to three hidden
+office-agent specialists. The code worker receives the project, repository,
+commit, diff, and merge-request tools; the issues worker receives only issue
+tools; and the CI worker receives only pipeline and job tools. The office
+manager itself has no GitLab tools and routes to each specialist through a
+unique two-tag match.
+
+For cross-domain requests, the office manager gathers Confluence, Jira, GitLab
+issue, GitLab code, and GitLab CI evidence independently before making exactly
+one engineering-worker call. It can then invoke each relevant specialist once
+more for explicitly authorized writes, with at most two specialist mutation
+calls per user turn. Authorization for one system, GitLab project, resource, or
+operation never authorizes another.
 
 The defaults target `http://127.0.0.1:8283`. To target another Letta API, set
 `LETTA_BASE_URL` in the process environment or pass `--base-url`. Use
