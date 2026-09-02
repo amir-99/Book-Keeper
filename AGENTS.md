@@ -203,6 +203,14 @@ requests. Preserve these properties:
   prompt; a model counting from `@@` headers puts comments on wrong lines.
 - Anchor exactly as GitLab requires: an added line sends only `new_line`, a
   removed line only `old_line`, an unchanged context line both.
+- Each specialist is driven by a mode the manager puts on the first line of the
+  delegated message as `MODE: <NAME>`, because the routing tool passes only a
+  string and the specialist sees neither the conversation nor the manager's
+  `<think>` preamble. Naming the mode in prose is not assigning it, and a
+  missing line surfaces to the user as `REVIEW_GITLAB_WORKFLOW_ERROR` or
+  `REVIEW_CONTEXT_WORKFLOW_ERROR` before any work happens. The two read-only
+  specialists fall back to their read mode when the line is absent and report
+  `inferred_mode`; the write modes never infer, so keep that asymmetry.
 - Two confirmations are mandatory and distinct. The first authorizes staging
   unpublished draft notes; the second authorizes publication. Asking for a
   review never authorizes either, and a finding never authorizes posting itself.
