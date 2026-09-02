@@ -20,14 +20,17 @@ OpenAI-compatible LiteLLM gateway.
 | `documents` | Stores Markdown and renders DOCX, PDF, HTML, ODT, and text | Internal only |
 | `gotenberg` | Converts office documents to PDF with LibreOffice | Internal only |
 
-The bundled assets add two user-facing agents:
+The bundled assets add three user-facing agents:
 
 - `engineering-assistant` routes work to small, medium, or large engineering
   workers and can use Tavily for web research.
 - `office-agent` coordinates bounded Confluence, Jira, GitLab, and document
   specialists, then delegates analysis to an engineering worker.
+- `code-review-agent` reviews a GitLab merge request against its diff and the
+  Jira and Confluence context named by its branch, then stages and publishes
+  review comments only after two separate confirmations.
 
-Specialist and worker agents are tagged `openwebui-hidden`, so only the two
+Specialist and worker agents are tagged `openwebui-hidden`, so only the three
 manager agents appear in Open WebUI's model picker.
 
 ## Architecture
@@ -68,6 +71,7 @@ must also contain these model handles:
 - `openai-proxy/openai/gpt-5.6-terra`
 - `openai-proxy/openai/gpt-5.6-sol`
 - `openai-proxy/google/gemini-3.7-flash`
+- `openai-proxy/anthropic/claude-opus-5`
 
 ## Quick start
 
@@ -223,6 +227,36 @@ workflow.
 
 For adding agents, MCP servers, or Python tools, and for details of the routing
 and permission model, read the [Letta assets guide](letta-assets/README.md).
+
+## Code review workflow
+
+`code-review-agent` reviews a GitLab merge request without cloning or running
+any code. It reads the diff, resolves the change's intent from the ticket named
+in the branch, and returns findings anchored to real diff lines.
+
+A review runs in three turns, with a confirmation gate before each write:
+
+1. **Review.** The GitLab specialist returns the merge request's `diff_refs`
+   and a diff whose lines already carry their resolved `old_line` and
+   `new_line`. The context specialist matches a `KEY-NUMBER` ticket id in the
+   source branch against the real Jira project keys, then reads that story, its
+   parent epic, and up to two Confluence pages linked from either. The analyst
+   turns both into a findings packet. Nothing is written to GitLab.
+2. **Stage.** After you confirm, each selected finding becomes an unpublished
+   draft note. Draft notes are visible only to their author, so you can review
+   the exact anchoring in GitLab's diff view and discard anything wrong.
+3. **Publish.** After a second, separate confirmation, the drafts are published
+   as one review with a summary note and a reviewer state.
+
+Comments are authored by the account owning `GITLAB_ACCESS_TOKEN`; there is no
+separate bot identity, which is why the summary note carries a footer marking
+the review as machine-assisted. The agent cannot approve or merge a merge
+request, and both `head_sha` checks abort the flow if the author pushes new
+commits mid-review, since every stored line anchor would then be stale.
+
+Progress is reported while the work runs: the manager emits a short thinking
+block before each specialist call, which Open WebUI renders live. A review of a
+small merge request takes a few minutes, most of it in the analysis step.
 
 ## Document workflow
 

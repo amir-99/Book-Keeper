@@ -71,6 +71,25 @@ class ReasoningSplitterTest(unittest.TestCase):
         self.assertEqual(joined(segments, "reasoning_content"), "ab")
         self.assertEqual(joined(segments, "content"), "onetwo")
 
+    def test_progress_beats_alternate_across_token_boundaries(self):
+        # The code-review manager emits one short block before each routing call,
+        # so several blocks arrive in one response with the tags split as usual.
+        segments = split(
+            ["<th", "ink", ">Resolving !42.</thi", "nk", ">",
+             "<think>", "Reading the diff.", "</think>",
+             "<think>Reviewing.</think>", "Done."]
+        )
+
+        self.assertEqual(
+            joined(segments, "reasoning_content"),
+            "Resolving !42.Reading the diff.Reviewing.",
+        )
+        self.assertEqual(joined(segments, "content"), "Done.")
+        self.assertEqual(
+            [name for name, _ in segments],
+            ["reasoning_content", "reasoning_content", "reasoning_content", "content"],
+        )
+
 
 def chunk(content=None, finish_reason=None, role=None):
     delta = {"content": content, "function_call": None, "refusal": None, "role": role, "tool_calls": None}
@@ -109,6 +128,18 @@ class RewriteChunkTest(unittest.TestCase):
         events = self.rewrite([chunk("<think>plan</think>hi", finish_reason="stop")])
 
         self.assertEqual([event["choices"][0]["finish_reason"] for event in events], [None, "stop"])
+
+    def test_repeated_beats_keep_their_channels_across_chunks(self):
+        events = self.rewrite(
+            [chunk("<think>step one</think>", role="assistant"), chunk("<think>step two</think>"), chunk("answer")]
+        )
+        deltas = [event["choices"][0]["delta"] for event in events]
+
+        self.assertEqual(
+            [d.get("reasoning_content") for d in deltas if d.get("reasoning_content")],
+            ["step one", "step two"],
+        )
+        self.assertEqual([d.get("content") for d in deltas if d.get("content")], ["answer"])
 
     def test_chunks_without_content_pass_through(self):
         usage_chunk = {"id": "chatcmpl-run-1", "choices": [], "usage": {"total_tokens": 7}}

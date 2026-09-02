@@ -37,6 +37,19 @@ API and is safe to run repeatedly.
 - `agents/office-agent-documents-worker.json`: A hidden, stateless documents
   specialist with seven authoring, rendering, and conversion tools. It turns
   an already-grounded answer into a downloadable file and never researches.
+- `agents/code-review-agent.json`: A user-facing merge-request reviewer backed
+  by GPT-5.6 Luna. It orchestrates three review specialists, streams a progress
+  note before each call, and gates draft staging and publication behind two
+  separate user confirmations.
+- `agents/code-review-gitlab-worker.json`: A hidden, stateless GitLab review
+  specialist with 11 tools. It gathers anchored diff evidence and stages,
+  discards, or publishes draft notes. It cannot approve or merge.
+- `agents/code-review-context-worker.json`: A hidden, stateless specialist that
+  resolves a merge-request branch to its Jira story, parent epic, and linked
+  Confluence pages, and reports what the change was intended to do.
+- `agents/code-review-analyst-worker.json`: A hidden, toolless analyst backed by
+  Claude Opus 5. It converts diff evidence and ticket context into a strict JSON
+  findings packet whose line anchors are copied from the diff.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
@@ -113,6 +126,16 @@ The Jira activities are intentionally separate:
 - `jira_list_transitions`: inspect the currently available workflow actions.
 - `jira_transition_issue`: apply one transition by its exact ID.
 
+`jira_get_issue_context` supports the code-review workflow. It reads one issue,
+resolves its parent epic, and collects Confluence URLs from both issues'
+descriptions and Jira remote links in a single call. Epic resolution needs no
+configuration: it prefers the native `parent` field, falls back to the
+instance's "Epic Link" custom field discovered from the field catalog, and
+finally to an epic-typed issue link. `confluence_get_page_by_url` is its
+counterpart, resolving a `pageId` parameter, a `/pages/<id>/` segment, or a
+`/display/<SPACE>/<Title>` path through a title search, and refusing URLs that
+do not belong to the configured Confluence site.
+
 Set `JIRA_BASE_URL`, `JIRA_ACCESS_TOKEN`, and `JIRA_AUTH_MODE` in the root
 `.env`. Use `bearer` for a Jira personal access token, `basic` for a raw
 `user:token` credential, or `basic_encoded` when the supplied value is already
@@ -140,6 +163,12 @@ The GitLab activities are intentionally split into narrow tools:
   `gitlab_get_merge_request`, `gitlab_get_merge_request_diffs`,
   `gitlab_create_merge_request`, `gitlab_update_merge_request`, and
   `gitlab_add_merge_request_note`.
+- Merge-request review: `gitlab_get_merge_request_review_diffs`,
+  `gitlab_list_merge_request_discussions`,
+  `gitlab_create_merge_request_draft_note`,
+  `gitlab_list_merge_request_draft_notes`,
+  `gitlab_delete_merge_request_draft_note`, and
+  `gitlab_publish_merge_request_draft_notes`.
 - CI/CD: `gitlab_list_pipelines`, `gitlab_get_pipeline`,
   `gitlab_run_pipeline`, `gitlab_retry_pipeline`,
   `gitlab_cancel_pipeline`, `gitlab_list_pipeline_jobs`, and

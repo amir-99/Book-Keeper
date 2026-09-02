@@ -34,6 +34,15 @@ response). Open WebUI creates the reasoning item on the first token of that
 channel, so the thinking block renders live. Keep this translation in place if
 the adapter is reworked; a plain passthrough brings the raw tags back.
 
+`code-review-agent` depends on the same path for a second purpose. A review
+takes minutes, and its routing tool blocks while a specialist runs, so the
+manager emits one short `<think>` block before each routing call as a progress
+report. `ReasoningSplitter` already alternates channels correctly across
+repeated blocks, and Letta flushes the manager's text between steps, so those
+beats reach the browser while the specialist is still working. Keep both
+behaviors: collapsing the manager back to a single preamble leaves a user
+watching a silent stream for minutes.
+
 ## Required embedding configuration
 
 Both applications must use the LiteLLM gateway configured by
@@ -178,6 +187,46 @@ When adding or changing an asset:
 - Download filenames are slugged from the title with Unicode letters and digits
   preserved. Do not reintroduce ASCII folding: it empties a Persian or CJK
   title and names the file after the raw document id.
+
+## Code review workflow
+
+`code-review-agent` and its three `code-review-*` workers review GitLab merge
+requests. Preserve these properties:
+
+- The review is diff-only by design. It never clones a repository and never
+  executes merge-request code, so no runner service or tool sandbox change is
+  required. Do not add one to "improve" the review without an explicit request:
+  merge-request branches are attacker-controlled input.
+- Line anchoring comes from `gitlab_get_merge_request_review_diffs`, which
+  returns `diff_refs` and the patches from the same read and resolves every
+  line's `old_line` and `new_line` itself. Never move that arithmetic into a
+  prompt; a model counting from `@@` headers puts comments on wrong lines.
+- Anchor exactly as GitLab requires: an added line sends only `new_line`, a
+  removed line only `old_line`, an unchanged context line both.
+- Two confirmations are mandatory and distinct. The first authorizes staging
+  unpublished draft notes; the second authorizes publication. Asking for a
+  review never authorizes either, and a finding never authorizes posting itself.
+- Both write modes re-read the merge request and abort with `REVIEW_STALE` when
+  `head_sha` has moved, because every stored anchor is then invalid.
+- Comments are authored by the operator's own account; there is no bot identity.
+  Keep the machine-assisted footer on the summary note, and keep the workflow
+  unable to approve or merge.
+- Severities are exactly `blocking`, `suggestion`, and `nit`. Finding selection
+  depends on those words, so do not rename or extend them.
+
+## Custom tool constraints
+
+Beyond the standard-library rule above, Letta derives each tool's JSON schema
+from its source and validates every function it finds:
+
+- A tool file must contain exactly one top-level function, named after the file.
+  `bootstrap` enforces this.
+- That function must contain no nested helper functions. Letta requires a full
+  Google-style docstring, including an `Args:` description for every parameter,
+  on each function it encounters, and rejects the whole tool otherwise. Inline
+  the helper or repeat the call instead; no existing tool nests functions.
+- These failures appear as an HTTP 400 from `PUT /v1/tools/` during bootstrap,
+  not at call time.
 
 ## Editing guidelines
 
