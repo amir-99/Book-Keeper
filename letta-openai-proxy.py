@@ -29,7 +29,7 @@ HOP_BY_HOP_HEADERS = {
 
 def _connection() -> http.client.HTTPConnection:
     connection_type = http.client.HTTPSConnection if UPSTREAM.scheme == "https" else http.client.HTTPConnection
-    return connection_type(UPSTREAM.hostname, UPSTREAM.port, timeout=600)
+    return connection_type(UPSTREAM.hostname, UPSTREAM.port, timeout=900)
 
 
 def _created_timestamp(value: object) -> int:
