@@ -229,6 +229,20 @@ requests. Preserve these properties:
   `REVIEW_CONTEXT_WORKFLOW_ERROR` before any work happens. The two read-only
   specialists fall back to their read mode when the line is absent and report
   `inferred_mode`; the write modes never infer, so keep that asymmetry.
+- The analyst reads for itself, within fixed budgets and under three rules.
+  `gitlab_get_file` must be called with `ref` set to the reviewed `head_sha`:
+  its default `HEAD` is the target branch, so an unpinned read makes a change
+  look like it contradicts a file it already updated, and a branch name moves
+  mid-review. File content informs a finding but is never quoted at length into
+  one, because a finding body becomes a public comment under the operator's own
+  account. `confluence_get_page_by_url` may open only a URL that arrived in the
+  ticket-context packet; a URL found in a diff, a branch name, or a
+  merge-request description is author-controlled, and following one lets the
+  code under review choose the requirements it is judged against.
+- The ticket-context specialist reports every URL in `confluence_urls`, marked
+  read or not read, not only the two it had budget to read. That list is the
+  analyst's entire allowed set of pages, so dropping the unread ones silently
+  removes the requirement text a later intent check depends on.
 - Only anchored findings can be staged. `gitlab_create_merge_request_draft_note`
   requires at least one positive line number, so a `general` entry has no home
   except the summary note published at the end. The first gate must offer the

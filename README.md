@@ -243,8 +243,10 @@ A review runs in three turns, with a confirmation gate before each write:
    the ones GitLab returned rather than a copy retyped through two agents. The
    context specialist matches a `KEY-NUMBER` ticket id in the source branch
    against the real Jira project keys, then reads that story, its parent epic,
-   and up to two Confluence pages linked from either. The analyst turns both into
-   a findings packet. Nothing is written to GitLab.
+   and up to two Confluence pages linked from either, listing every page it
+   found. The analyst turns both into a findings packet, opening a few
+   repository files at the reviewed commit and at most two of those pages when
+   the diff alone cannot settle a judgement. Nothing is written to GitLab.
 2. **Stage.** After you confirm, each selected anchored finding becomes an
    unpublished draft note. A finding that could not be tied to a diff line is not
    stageable and appears in the summary note at publication instead. Draft notes are visible only to their author, so you can review
