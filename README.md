@@ -72,6 +72,7 @@ must also contain these model handles:
 - `openai-proxy/openai/gpt-5.6-sol`
 - `openai-proxy/google/gemini-3.7-flash`
 - `openai-proxy/anthropic/claude-opus-5`
+- `openai-proxy/anthropic/claude-sonnet-5`
 
 ## Quick start
 

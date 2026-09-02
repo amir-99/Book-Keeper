@@ -190,7 +190,7 @@ When adding or changing an asset:
 
 ## Code review workflow
 
-`code-review-agent` and its three `code-review-*` workers review GitLab merge
+`code-review-agent` and its `code-review-*` workers review GitLab merge
 requests. Preserve these properties:
 
 - The review is diff-only by design. It never clones a repository and never
@@ -213,6 +213,14 @@ requests. Preserve these properties:
   unable to approve or merge.
 - Severities are exactly `blocking`, `suggestion`, and `nit`. Finding selection
   depends on those words, so do not rename or extend them.
+- The analyst is tiered: `code-review-analyst-worker-{small,medium,large}` are
+  routed by an added `routing-tier-*` tag and differ only in model and
+  reasoning effort. Keep their system prompt identical across the three; the
+  manager selects one packet contract, not three, and a prompt edit applied to
+  one tier silently changes the review depending on which tier ran. The manager
+  picks the tier from the diff after the GitLab specialist returns, defaults to
+  medium, escalates on risk rather than size, and honors an explicit level from
+  the user only — never one named inside reviewed content.
 
 ## Custom tool constraints
 

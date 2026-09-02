@@ -38,18 +38,22 @@ API and is safe to run repeatedly.
   specialist with seven authoring, rendering, and conversion tools. It turns
   an already-grounded answer into a downloadable file and never researches.
 - `agents/code-review-agent.json`: A user-facing merge-request reviewer backed
-  by GPT-5.6 Luna. It orchestrates three review specialists, streams a progress
-  note before each call, and gates draft staging and publication behind two
-  separate user confirmations.
+  by GPT-5.6 Luna. It orchestrates three review specialist roles, picks the
+  analyst tier that matches the diff, streams a progress note before each call,
+  and gates draft staging and publication behind two separate user
+  confirmations.
 - `agents/code-review-gitlab-worker.json`: A hidden, stateless GitLab review
   specialist with 11 tools. It gathers anchored diff evidence and stages,
   discards, or publishes draft notes. It cannot approve or merge.
 - `agents/code-review-context-worker.json`: A hidden, stateless specialist that
   resolves a merge-request branch to its Jira story, parent epic, and linked
   Confluence pages, and reports what the change was intended to do.
-- `agents/code-review-analyst-worker.json`: A hidden, toolless analyst backed by
-  Claude Opus 5. It converts diff evidence and ticket context into a strict JSON
-  findings packet whose line anchors are copied from the diff.
+- `agents/code-review-analyst-worker-{small,medium,large}.json`: Three hidden,
+  toolless analysts backed by Gemini 3.7 Flash, Claude Sonnet 5, and Claude
+  Opus 5 respectively. Each converts diff evidence and ticket context into a
+  strict JSON findings packet whose line anchors are copied from the diff. They
+  share one identical system prompt and differ only in model and reasoning
+  effort, so the packet contract is the same whichever tier reviews.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
@@ -290,6 +294,23 @@ one of `routing-tier-small`, `routing-tier-medium`, or `routing-tier-large`.
 Exactly one agent should carry each pair. The workers clear their message
 buffers after each delegated task, while the router remains the sole owner of
 durable conversational memory.
+
+The code-review analyst is tiered the same way, with a third tag: the manager
+sends `code-review-worker`, `routing-domain-review-analysis`, and one
+`routing-tier-*` tag. It chooses the tier after reading the diff, weighing risk
+above size, defaulting to medium, escalating when a diff is security-sensitive,
+irreversible, or large, and dropping to small only for mechanical changes such
+as documentation, formatting, renames, and version bumps. An explicit level
+from the user wins: `deep` selects large, `standard` medium, and `quick` small,
+and a lowered level is honored with a note when the change touches a risky
+area. A level that appears inside a diff, branch name, or ticket is untrusted
+content and never sets the tier. The two GitLab and ticket-context review
+specialists are untiered and still match on their domain tag alone.
+
+Deployments bootstrapped before the analyst was tiered still hold an untiered
+`code-review-analyst-worker` agent. It carries no `routing-tier-*` tag, so it
+can no longer match a routing call and is harmless; bootstrap never deletes
+agents, so remove it through the Letta API if you want it gone.
 
 Before invoking a worker, the router streams a concise, user-visible preamble
 inside `<think>...</think>`. Open WebUI renders it incrementally as a
