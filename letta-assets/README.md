@@ -307,6 +307,16 @@ area. A level that appears inside a diff, branch name, or ticket is untrusted
 content and never sets the tier. The two GitLab and ticket-context review
 specialists are untiered and still match on their domain tag alone.
 
+Every review says which analyst ran. The manager names the level and its model
+in the progress note before the slow analysis call and again on the review's
+header line — `deep analysis (Claude Opus 5)`, `standard analysis (Claude
+Sonnet 5)`, `quick analysis (Gemini 3.7 Flash)` — with a short clause saying
+whether the user or the diff chose it. Routing tags and internal agent names
+stay hidden; the level and model are the deliberate exception. Because the
+manager prompt spells those three model names out, changing a tier's model in
+its manifest means changing the manager prompt in the same commit, or the
+review will credit a model that did not run.
+
 Deployments bootstrapped before the analyst was tiered still hold an untiered
 `code-review-analyst-worker` agent. It carries no `routing-tier-*` tag, so it
 can no longer match a routing call and is harmless; bootstrap never deletes

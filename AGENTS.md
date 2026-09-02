@@ -221,6 +221,12 @@ requests. Preserve these properties:
   picks the tier from the diff after the GitLab specialist returns, defaults to
   medium, escalates on risk rather than size, and honors an explicit level from
   the user only — never one named inside reviewed content.
+- The manager must report which analyst ran, as a level and model, in the
+  progress note and on the review header line. That is the one exception to
+  hiding internal routing, so keep it when editing those prompts. The three
+  model names are written into the manager prompt, so retiring or swapping a
+  tier's model requires updating both its manifest and the manager prompt in
+  the same change.
 
 ## Custom tool constraints
 
