@@ -39,21 +39,24 @@ API and is safe to run repeatedly.
   an already-grounded answer into a downloadable file and never researches.
 - `agents/code-review-agent.json`: A user-facing merge-request reviewer backed
   by GPT-5.6 Luna. It orchestrates three review specialist roles, picks the
-  analyst tier that matches the diff, streams a progress note before each call,
-  and gates draft staging and publication behind two separate user
-  confirmations.
+  analyst tier that matches the diff, opens and closes the review record and
+  optional pinned workspace, and gates draft staging and publication behind
+  two separate user confirmations. The adapter derives progress from actual
+  tool events while workers append factual milestones.
 - `agents/code-review-gitlab-worker.json`: A hidden, stateless GitLab review
-  specialist with 11 tools. It gathers anchored diff evidence and stages,
-  discards, or publishes draft notes. It cannot approve or merge.
+  specialist with 14 tools. It gathers anchored diff evidence, owns the two
+  workspace lifecycle modes, and stages, discards, or publishes draft notes.
+  It cannot approve or merge.
 - `agents/code-review-context-worker.json`: A hidden, stateless specialist that
   resolves a merge-request branch to its Jira story, parent epic, and linked
   Confluence pages, and reports what the change was intended to do.
-- `agents/code-review-analyst-worker-{small,medium,large}.json`: Three hidden,
-  toolless analysts backed by Gemini 3.7 Flash, Claude Sonnet 5, and Claude
-  Opus 5 respectively. Each converts diff evidence and ticket context into a
-  strict JSON findings packet whose line anchors are copied from the diff. They
-  share one identical system prompt and differ only in model and reasoning
-  effort, so the packet contract is the same whichever tier reviews.
+- `agents/code-review-analyst-worker-{small,medium,large}.json`: Three hidden
+  analysts backed by Gemini 3.7 Flash, Claude Sonnet 5, and Claude Opus 5
+  respectively. Each has the same nine read/progress tools, converts diff and
+  ticket context into a strict JSON findings packet, and may search a pinned
+  workspace when one is supplied. They share one identical system prompt and
+  differ only in model and reasoning effort, so the packet contract is the
+  same whichever tier reviews.
 - `tools/route_to_agent_by_tags.py`: The router's credential-free source for
   resolving exactly one local worker by tags and waiting for its reply. It
   reads the local Letta API credential only from the tool environment.
@@ -72,6 +75,10 @@ API and is safe to run repeatedly.
   file conversion. They exchange document ids and download URLs with the
   internal `documents` service and never handle rendering libraries
   themselves.
+- `tools/workspace_*.py` and `tools/review_progress_report.py`: Thin,
+  standard-library clients for pinned read-only repository evidence, review
+  lifecycle cleanup, and bounded progress events. Limits and the secret-file
+  denylist are enforced by the review service, not by these clients.
 
 ## Bootstrap
 
@@ -184,6 +191,11 @@ personal, project, or group access token in `GITLAB_ACCESS_TOKEN` in the root
 operations bound large file, diff, description, and trace outputs. Create,
 update, comment, run, retry, and cancel operations are separate functions so an
 agent can receive only the mutations it needs.
+
+Repository workspaces use a second credential,
+`GITLAB_WORKSPACE_TOKEN`, scoped only to `read_repository`. It is injected into
+the isolated `review` service and is never shared with GitLab comment tools.
+`REVIEW_API_KEY` authenticates the Letta tools and adapter to that service.
 
 `gitlab_list_my_merge_requests` uses GitLab's instance-wide merge-request API
 instead of enumerating projects. One invocation queries merge requests created
@@ -308,14 +320,14 @@ content and never sets the tier. The two GitLab and ticket-context review
 specialists are untiered and still match on their domain tag alone.
 
 Each routing call in this workflow opens with `MODE: <NAME>` on its own first
-line: `EVIDENCE_GATHER`, `STAGE_DRAFTS`, `PUBLISH_REVIEW`, or `DISCARD_DRAFTS`
-for the GitLab specialist, `TICKET_CONTEXT` for the ticket-context specialist,
-and `REVIEW_ANALYSIS` for the analyst. The routing tool passes a bare string, so
-that line is the only thing that assigns the mode; a prose paraphrase returns
-`REVIEW_GITLAB_WORKFLOW_ERROR` and ends the review before it starts. The manager
-may repair and repeat a read-only call once, and the two read-only specialists
-now fall back to their read mode when the line is missing, reporting
-`inferred_mode` in the packet. The write modes never infer.
+line: `EVIDENCE_GATHER`, `WORKSPACE_OPEN`, `WORKSPACE_DISCARD`,
+`STAGE_DRAFTS`, `PUBLISH_REVIEW`, or `DISCARD_DRAFTS` for the GitLab specialist,
+`TICKET_CONTEXT` for the ticket-context specialist, and `REVIEW_ANALYSIS` for
+the analyst. After workspace open, read-only packets also carry `REVIEW:` and
+optional `WORKSPACE:` lines. The routing tool passes a bare string, so the mode
+line is the only thing that assigns the operation; a prose paraphrase returns a
+workflow error. Safe evidence modes may infer their read default, while write
+and workspace lifecycle modes never infer.
 
 Every review says which analyst ran. The manager names the level and its model
 in the progress note before the slow analysis call and again on the review's
@@ -332,12 +344,12 @@ Deployments bootstrapped before the analyst was tiered still hold an untiered
 can no longer match a routing call and is harmless; bootstrap never deletes
 agents, so remove it through the Letta API if you want it gone.
 
-Before invoking a worker, the router streams a concise, user-visible preamble
-inside `<think>...</think>`. Open WebUI renders it incrementally as a
-collapsible reasoning section while the worker runs. The worker then returns
-only the final answer. This preamble is an approach-and-checks summary; raw
-hidden chain-of-thought, prompts, memory, credentials, tool payloads, and
-routing details must not be exposed.
+The adapter maps optional `<think>...</think>` narration to Open WebUI's
+collapsible reasoning section. For code reviews in native stream mode it also
+derives routing start/completion beats, real elapsed time, and worker-reported
+milestones without depending on manager prose. The final content channel still
+contains only the answer. Raw hidden chain-of-thought, prompts, memory,
+credentials, tool payloads, and routing details must not be exposed.
 
 The two user-facing managers and all three engineering workers also carry a
 read-only `frontend_rendering` memory block. It tells them to default to clear

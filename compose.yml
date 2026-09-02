@@ -81,8 +81,14 @@ services:
       DOCUMENTS_BASE_URL: http://documents:8090
       DOCUMENTS_API_KEY: ${DOCUMENTS_API_KEY}
 
+      # Review tools use a separate, short-lived repository workspace service.
+      REVIEW_BASE_URL: http://review:8091
+      REVIEW_API_KEY: ${REVIEW_API_KEY}
+
     depends_on:
       postgres:
+        condition: service_healthy
+      review:
         condition: service_healthy
 
     volumes:
@@ -97,9 +103,11 @@ services:
 
     networks:
       - ai-net
+      - review-net
 
   # Letta's native /v1/models response is not OpenAI-shaped. This adapter
-  # exposes Letta agents as OpenAI models and forwards chat completions.
+  # exposes agents as OpenAI models and translates typed native message streams
+  # while retaining the old chat-completions path as a deploy-time fallback.
   letta-openai:
     image: letta/letta@sha256:aa66c3eeee13d2dfc40c650d709b550237ee31bfc91942a52fa488a13fa8c102
     container_name: letta-openai
@@ -110,6 +118,11 @@ services:
       LETTA_UPSTREAM_URL: http://letta:8283
       LETTA_API_KEY: ${LETTA_API_KEY}
       PROXY_PORT: "8081"
+      # Native typed events provide tool lifecycle beats and review progress.
+      # Set openai to restore the previous chat-completions passthrough path.
+      PROXY_STREAM_MODE: ${PROXY_STREAM_MODE:-native}
+      REVIEW_BASE_URL: http://review:8091
+      REVIEW_API_KEY: ${REVIEW_API_KEY}
 
     depends_on:
       letta:
@@ -126,6 +139,7 @@ services:
 
     networks:
       - ai-net
+      - review-net
 
   open-webui:
     image: ghcr.io/open-webui/open-webui@sha256:8afd2d774834c618a75411b3491cdc5da7396dc464f56a160b937ff2992eb6e4
@@ -235,12 +249,55 @@ services:
     networks:
       - ai-net
 
+  # Ephemeral, pinned, read-only repository workspaces plus the small review
+  # record and progress-event log that own their lifecycle. This service is on
+  # no application-data network and never receives GitLab write credentials.
+  review:
+    build: ./review
+    container_name: review
+    restart: unless-stopped
+
+    environment:
+      REVIEW_API_KEY: ${REVIEW_API_KEY}
+      GITLAB_BASE_URL: ${GITLAB_BASE_URL}
+      GITLAB_WORKSPACE_TOKEN: ${GITLAB_WORKSPACE_TOKEN}
+      WORKSPACE_TTL_SECONDS: "2700"
+      WORKSPACE_MAX_CONCURRENT: "3"
+      WORKSPACE_MAX_BYTES: "2147483648"
+      WORKSPACE_FETCH_DEPTH: "50"
+      REVIEW_RECORD_RETENTION_DAYS: "30"
+
+    volumes:
+      - review_data:/data
+
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8091/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+    networks:
+      - review-net
+
 volumes:
   postgres_data:
   letta_data:
   openwebui_data:
   documents_data:
+  review_data:
 
 networks:
   ai-net:
+    driver: bridge
+  review-net:
     driver: bridge

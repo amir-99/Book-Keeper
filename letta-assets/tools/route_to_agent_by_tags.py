@@ -86,7 +86,9 @@ def route_to_agent_by_tags(message: str, match_all: list[str]) -> str:
             method="POST",
             headers=headers,
         )
-        with urlopen(worker_request, timeout=900) as response:
+        # Return a controlled routing failure before the 900-second Letta tool
+        # sandbox kills this caller. Equal timeouts race at the outer boundary.
+        with urlopen(worker_request, timeout=840) as response:
             response_payload = json.loads(response.read())
     except HTTPError as error:
         return f"ROUTING_ERROR: local Letta API returned HTTP {error.code} while running worker"

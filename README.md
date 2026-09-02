@@ -19,6 +19,7 @@ OpenAI-compatible LiteLLM gateway.
 | `postgres` | Separate Letta and Open WebUI databases, both with PGVector | Internal only |
 | `documents` | Stores Markdown and renders DOCX, PDF, HTML, ODT, and text | Internal only |
 | `gotenberg` | Converts office documents to PDF with LibreOffice | Internal only |
+| `review` | Owns ephemeral pinned repository workspaces and review progress | Internal only |
 
 The bundled assets add three user-facing agents:
 
@@ -46,6 +47,9 @@ flowchart LR
 
     Letta --> Tools[Confluence / Jira / GitLab / Tavily]
     Letta --> Documents[Documents service]
+    Letta --> Review[Review workspace service]
+    Adapter -- progress events --> Review
+    Review -- read-only fetch --> GitLab[GitLab]
     Documents --> Gotenberg[Gotenberg]
     Documents -- rendered files --> WebUI
 
@@ -56,6 +60,11 @@ flowchart LR
 Chat traffic reaches Letta through the compatibility adapter. RAG embedding
 traffic does not: both Letta and Open WebUI send embeddings directly to
 LiteLLM using `openai/text-embedding-3-small`.
+
+The review service shares a dedicated network only with Letta and the adapter.
+It cannot resolve PostgreSQL, Open WebUI, or the documents service, and it
+receives a GitLab token scoped to `read_repository` rather than the token used
+to post comments.
 
 ## Requirements
 
@@ -95,7 +104,7 @@ must also contain these model handles:
    deployment. Changing them can invalidate encrypted provider data or user
    sessions.
 
-3. Validate and start the six services:
+3. Validate and start the seven services:
 
    ```sh
    docker compose config --quiet
@@ -103,8 +112,8 @@ must also contain these model handles:
    docker compose ps
    ```
 
-   Wait until every service reports `healthy`. The initial image download and
-   documents image build can take several minutes.
+   Wait until every service reports `healthy`. The initial image downloads and
+   local service builds can take several minutes.
 
 4. Open <http://127.0.0.1:3000> and create the first Open WebUI account. To
    enable downloadable document renders, create an API key under
@@ -126,12 +135,14 @@ must also contain these model handles:
    MCP tools, and preserves writable agent memory. It does not delete remote
    resources merely because a local manifest was removed.
 
-6. Refresh Open WebUI and select `engineering-assistant` or `office-agent`.
+6. Refresh Open WebUI and select `engineering-assistant`, `office-agent`, or
+   `code-review-agent`.
 
 Confluence, Jira, and GitLab credentials are only needed when those integrations
 are used. Their tools can be registered before valid credentials are supplied,
 but calls will fail until the matching `.env` values are configured and the
-`letta` service is recreated.
+`letta` service is recreated. Repository-backed code reviews additionally need
+`GITLAB_WORKSPACE_TOKEN` and the `review` service recreated.
 
 ## Configuration
 
@@ -157,7 +168,9 @@ supported setting without containing working credentials.
 | `TAVILY_MCP_URL` | Complete credential-bearing URL for the Tavily MCP server |
 | `CONFLUENCE_*` | Confluence base URL, access token, and optional auth mode |
 | `JIRA_*` | Jira base URL, access token, and auth mode |
-| `GITLAB_*` | GitLab site root and access token |
+| `GITLAB_BASE_URL`, `GITLAB_ACCESS_TOKEN` | GitLab site root and operator token used by comment tools |
+| `GITLAB_WORKSPACE_TOKEN` | Separate GitLab token scoped only to `read_repository` |
+| `REVIEW_API_KEY` | Shared secret between Letta, the adapter, and the review service |
 | `DOCUMENTS_API_KEY` | Shared secret between Letta and the documents service |
 | `OPENWEBUI_API_KEY` | Lets the documents service upload finished renders to Open WebUI |
 | `DOCUMENTS_PUBLIC_BASE_URL` | Browser-visible Open WebUI origin used in download links |
@@ -179,7 +192,7 @@ Check container health and logs:
 
 ```sh
 docker compose ps
-docker compose logs --tail=100 letta open-webui letta-openai documents
+docker compose logs --tail=100 letta open-webui letta-openai documents review
 ```
 
 Confirm that the required embedding routes have not drifted:
@@ -205,6 +218,8 @@ Check both document-rendering services:
 ```sh
 docker compose exec -T documents curl -fsS http://localhost:8090/health
 docker compose exec -T documents curl -fsS http://gotenberg:3000/health
+docker compose exec -T review curl -fsS http://localhost:8091/health
+docker compose exec -T letta curl -fsS http://review:8091/health
 ```
 
 ## Declarative agents and tools
@@ -231,22 +246,29 @@ and permission model, read the [Letta assets guide](letta-assets/README.md).
 
 ## Code review workflow
 
-`code-review-agent` reviews a GitLab merge request without cloning or running
-any code. It reads the diff, resolves the change's intent from the ticket named
-in the branch, and returns findings anchored to real diff lines.
+`code-review-agent` reviews a GitLab merge request without running any
+repository code. For medium and deep reviews—and whenever GitLab withholds a
+patch—it receives a disposable clone pinned to the reviewed head SHA. The
+minimal review image has no project runtime or toolchain, disables hooks,
+submodules, LFS filters, and repository-selected protocols, and uses a separate
+read-only GitLab credential.
 
 A review runs in three turns, with a confirmation gate before each write:
 
 1. **Review.** The GitLab specialist returns the merge request's `diff_refs`,
    its changed-file list, and a coverage count, but not the diff itself: the
    analyst reads that from the same tool directly, so the lines it anchors to are
-   the ones GitLab returned rather than a copy retyped through two agents. The
-   context specialist matches a `KEY-NUMBER` ticket id in the source branch
+   the ones a tool returned rather than a copy retyped through two agents. A
+   review record is opened next; it owns an optional workspace fetched from the
+   merge-request ref and rejects a moved `head_sha` as stale. The context
+   specialist matches a `KEY-NUMBER` ticket id in the source branch
    against the real Jira project keys, then reads that story, its parent epic,
    and up to two Confluence pages linked from either, listing every page it
-   found. The analyst turns both into a findings packet, opening a few
-   repository files at the reviewed commit and at most two of those pages when
-   the diff alone cannot settle a judgement. Nothing is written to GitLab.
+   found. The analyst turns both into a findings packet, using `workspace_diff`
+   to recover real old/new line anchors for patches GitLab withheld and search
+   to inspect related callers before speculating. The workspace is discarded
+   immediately after analysis and before the first human gate. Nothing is
+   written to GitLab.
 2. **Stage.** After you confirm, each selected anchored finding becomes an
    unpublished draft note. A finding that could not be tied to a diff line is not
    stageable and appears in the summary note at publication instead. Draft notes are visible only to their author, so you can review
@@ -268,9 +290,23 @@ dropped, and whether another page exists; the analyst pages through the rest
 within a fixed budget and lists whatever remains under what was not reviewed. A
 gap in the evidence is reported as a gap, never as a finding about the code.
 
-Progress is reported while the work runs: the manager emits a short thinking
-block before each specialist call, which Open WebUI renders live. A review of a
-small merge request takes a few minutes, most of it in the analysis step.
+Workspace limits are enforced by the service: 25 reads per review, four
+searches, 2,000 lines per file read, 200 matches per search, and ten seconds per
+Git subprocess. Files matching secret-like names such as `.env*`, private-key
+formats, and keystores are withheld server-side. A line from a file, search, or
+blame response is context only; only GitLab's diff tool and `workspace_diff`
+produce valid comment anchors.
+
+Progress is reported while the work runs. In native mode the adapter derives
+start and completion beats from actual routing events, including elapsed time,
+and interleaves factual worker milestones from the review event log. They use
+Open WebUI's collapsible reasoning channel, so the final message contains only
+the review. Set `PROXY_STREAM_MODE=openai` to restore the previous
+chat-completions path if native streaming needs to be disabled during a deploy.
+
+Cleanup has three layers: closing the review record discards its owned
+workspace, a 45-minute TTL reaper handles interrupted sessions, and fixed
+concurrent/byte capacity refuses new clones rather than evicting a live one.
 
 ## Document workflow
 
@@ -290,7 +326,7 @@ the [asset guide](letta-assets/README.md#bootstrap).
 
 ## Data and lifecycle
 
-Persistent state is stored in four named volumes:
+Persistent state is stored in five named volumes:
 
 | Volume | Contents |
 | --- | --- |
@@ -298,6 +334,7 @@ Persistent state is stored in four named volumes:
 | `letta_data` | Letta filesystem state |
 | `openwebui_data` | Open WebUI uploads, cache files, and local assets |
 | `documents_data` | Markdown sources and rendered documents |
+| `review_data` | Small review/event records and live ephemeral workspaces |
 
 Common operations:
 
@@ -313,8 +350,8 @@ docker compose down
 ```
 
 Do not run `docker compose down -v` unless you intend to permanently delete
-the databases, agents, uploads, and documents. Back up the named volumes before
-host migration or destructive maintenance.
+the databases, agents, uploads, documents, and review records. Back up the
+named volumes before host migration or destructive maintenance.
 
 ## Development checks
 
@@ -333,8 +370,8 @@ python3 -m unittest discover -s tests
 ```
 
 The repository intentionally pins published container images by digest.
-`documents/` is the only locally built image, and its base image is pinned in
-[`documents/Dockerfile`](documents/Dockerfile).
+`documents/` and `review/` are the only locally built images. Each pins its
+base image digest in its Dockerfile.
 
 ## Troubleshooting
 
@@ -352,9 +389,11 @@ The public base URL must match the origin used in the browser.
 
 **An integration tool returns an authentication error.** Verify the matching
 base URL, token, and auth mode in `.env`, then recreate `letta`. Never place
-credentials directly in an agent, MCP, or tool manifest.
+credentials directly in an agent, MCP, or tool manifest. Repository fetching
+specifically requires `GITLAB_WORKSPACE_TOKEN` with `read_repository`; do not
+reuse the broader comment-writing token.
 
 **A service remains unhealthy.** Inspect it with
 `docker compose logs --tail=200 <service>`. PostgreSQL must be healthy before
-Letta starts, Letta before the adapter, and Gotenberg before the documents
-service.
+Letta starts, Letta before the adapter, Gotenberg before the documents service,
+and the review service before Letta's review tools become usable.

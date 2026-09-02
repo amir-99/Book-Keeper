@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import time
 import unittest
 from pathlib import Path
 
@@ -154,6 +155,121 @@ class RewriteChunkTest(unittest.TestCase):
 
         for event in events:
             self.assertEqual(json.loads(proxy.sse_event(event)[6:].strip()), event)
+
+
+class NativeRequestTest(unittest.TestCase):
+    def test_native_request_preserves_only_last_user_message(self):
+        model, request, streaming = proxy.native_request(
+            {
+                "model": "agent-123",
+                "messages": [
+                    {"role": "user", "content": "old"},
+                    {"role": "assistant", "content": "answer"},
+                    {"role": "user", "content": "new"},
+                ],
+                "stream": True,
+            }
+        )
+
+        self.assertEqual(model, "agent-123")
+        self.assertEqual(request["messages"], [{"role": "user", "content": "new"}])
+        self.assertTrue(request["stream_tokens"])
+        self.assertTrue(request["include_pings"])
+        self.assertTrue(streaming)
+
+    def test_native_request_honors_non_streaming(self):
+        _, _, streaming = proxy.native_request(
+            {"model": "agent-123", "messages": [{"role": "user", "content": "hi"}], "stream": False}
+        )
+
+        self.assertFalse(streaming)
+
+    def test_native_request_requires_user_message(self):
+        with self.assertRaisesRegex(ValueError, "user message"):
+            proxy.native_request(
+                {"model": "agent-123", "messages": [{"role": "assistant", "content": "hi"}]}
+            )
+
+
+class NativeTranslatorTest(unittest.TestCase):
+    def test_typed_reasoning_and_split_assistant_content_use_separate_channels(self):
+        translator = proxy.NativeTranslator()
+
+        segments = translator.feed({"message_type": "reasoning_message", "reasoning": "native plan"})
+        segments += translator.feed({"message_type": "assistant_message", "content": "<think>beat</think>answer"})
+
+        self.assertEqual(proxy.native_text([{"type": "text", "text": "a"}, {"text": "b"}], "content"), "ab")
+        self.assertEqual(joined(segments, "reasoning_content"), "native planbeat")
+        self.assertEqual(joined(segments, "content"), "answer")
+
+    def test_route_call_emits_start_and_elapsed_completion_beats(self):
+        translator = proxy.NativeTranslator()
+        review_id = "rev_" + "a" * 32
+        arguments = json.dumps(
+            {
+                "message": f"MODE: REVIEW_ANALYSIS\nREVIEW: {review_id}\nproject: group/app",
+                "match_all": [
+                    "code-review-worker",
+                    "routing-domain-review-analysis",
+                    "routing-tier-large",
+                ],
+            }
+        )
+
+        started = translator.feed(
+            {
+                "message_type": "tool_call_message",
+                "tool_call": {
+                    "name": "route_to_agent_by_tags",
+                    "arguments": arguments,
+                    "tool_call_id": "call-1",
+                },
+            }
+        )
+        translator.calls["call-1"]["started"] = time.monotonic() - 65
+        completed = translator.feed(
+            {
+                "message_type": "tool_return_message",
+                "tool_call_id": "call-1",
+                "status": "success",
+                "tool_return": "must not leak",
+            }
+        )
+
+        self.assertEqual(translator.review_id, review_id)
+        self.assertIn("deep analyst (Claude Opus 5)", joined(started, "reasoning_content"))
+        self.assertIn("completed in 1:05", joined(completed, "reasoning_content"))
+        self.assertNotIn("must not leak", joined(completed, "reasoning_content"))
+
+    def test_route_arguments_are_not_forwarded_as_content(self):
+        translator = proxy.NativeTranslator()
+        arguments = json.dumps(
+            {"message": "MODE: EVIDENCE_GATHER\nproject: group/app", "match_all": ["code-review-worker"]}
+        )
+
+        segments = translator.feed(
+            {
+                "message_type": "tool_call_message",
+                "tool_calls": {
+                    "name": "route_to_agent_by_tags",
+                    "arguments": arguments,
+                    "tool_call_id": "call-2",
+                },
+            }
+        )
+
+        self.assertEqual(joined(segments, "content"), "")
+        self.assertEqual(joined(segments, "reasoning_content"), "Reading GitLab evidence…\n")
+
+    def test_stop_reason_flushes_unterminated_think_block(self):
+        translator = proxy.NativeTranslator()
+        initial = translator.feed({"message_type": "assistant_message", "content": "<think>held"})
+
+        segments = translator.feed({"message_type": "stop_reason", "stop_reason": "end_turn"})
+
+        self.assertEqual(initial, [("reasoning_content", "held")])
+        self.assertEqual(segments, [])
+        self.assertEqual(translator.finish(), [])
 
 
 if __name__ == "__main__":

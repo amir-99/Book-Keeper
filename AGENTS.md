@@ -13,10 +13,13 @@ This repository defines a Docker Compose stack containing:
 - A documents service that renders Markdown to `.docx`, `.pdf`, `.html`,
   `.odt`, and `.txt`, with Gotenberg providing headless LibreOffice for the
   PDF step.
+- An isolated review service that owns ephemeral, SHA-pinned, read-only GitLab
+  workspaces plus review records and progress events.
 
 The main deployment definition is `compose.yml`. PostgreSQL initialization is
 handled by `postgres-init.sh`, `letta-openai-proxy.py` implements the Letta
-adapter, and `documents/` holds the document service and its image build.
+adapter, `documents/` holds the document service, and `review/` holds the
+repository-workspace service.
 
 ## Reasoning preamble handling
 
@@ -27,21 +30,21 @@ the tags arrive split across chunks (`<th`, `ink`, `>I`). Open WebUI's own
 the message into a reasoning block once the response is finalized, which leaves
 the tags visible for as long as the message is still streaming.
 
-`letta-openai-proxy.py` therefore parses the chat-completions stream instead of
-relaying it byte for byte, and moves the block onto `delta.reasoning_content`
+`letta-openai-proxy.py` therefore parses the stream instead of relaying it byte
+for byte, and moves the block onto `delta.reasoning_content`
 (`message.reasoning_content` when the caller asked for a non-streaming
 response). Open WebUI creates the reasoning item on the first token of that
 channel, so the thinking block renders live. Keep this translation in place if
 the adapter is reworked; a plain passthrough brings the raw tags back.
 
-`code-review-agent` depends on the same path for a second purpose. A review
-takes minutes, and its routing tool blocks while a specialist runs, so the
-manager emits one short `<think>` block before each routing call as a progress
-report. `ReasoningSplitter` already alternates channels correctly across
-repeated blocks, and Letta flushes the manager's text between steps, so those
-beats reach the browser while the specialist is still working. Keep both
-behaviors: collapsing the manager back to a single preamble leaves a user
-watching a silent stream for minutes.
+Native proxy mode translates Letta's typed reasoning and assistant messages,
+derives start/completion beats from actual `route_to_agent_by_tags` tool events,
+and polls the review service's event log while that blocking call runs. All of
+those progress messages use `reasoning_content`; putting them on `content`
+would leave step prose in the final answer. `ReasoningSplitter` stays because
+optional manager-authored `<think>` narration still arrives inside typed
+assistant messages. Keep `PROXY_STREAM_MODE=openai` as the deploy-time fallback
+to the old chat-completions path.
 
 ## Required embedding configuration
 
@@ -169,10 +172,10 @@ When adding or changing an asset:
   documents container. Letta tools exchange document ids and download URLs
   across that HTTP boundary and never handle document bytes beyond base64 input
   to `document_convert`.
-- `documents` is the one service that uses `build:` instead of a published
-  digest. Its base image digest is pinned inside `documents/Dockerfile`, which
-  keeps the build reproducible; preserve that pin under the same rule as the
-  Compose image digests.
+- `documents` is one of the two services that use `build:` instead of a
+  published digest. Its base image digest is pinned inside
+  `documents/Dockerfile`, which keeps the build reproducible; preserve that pin
+  under the same rule as the Compose image digests.
 - Gotenberg listens on port 3000 inside its own container. That is not a clash
   with Open WebUI's published `3000:8080` mapping, and Gotenberg publishes no
   port at all. Do not "fix" it.
@@ -193,14 +196,18 @@ When adding or changing an asset:
 `code-review-agent` and its `code-review-*` workers review GitLab merge
 requests. Preserve these properties:
 
-- The review is diff-only by design. It never clones a repository and never
-  executes merge-request code, so no runner service or tool sandbox change is
-  required. Do not add one to "improve" the review without an explicit request:
-  merge-request branches are attacker-controlled input.
-- Line anchoring comes from `gitlab_get_merge_request_review_diffs`, which
-  returns `diff_refs` and the patches from the same read and resolves every
-  line's `old_line` and `new_line` itself. Never move that arithmetic into a
-  prompt; a model counting from `@@` headers puts comments on wrong lines.
+- Medium and large reviews, plus any review whose GitLab evidence contains
+  `content_unavailable`, receive an ephemeral repository clone fetched with a
+  read-only token and pinned to the reviewed `head_sha`. Repository content is
+  data, never code: no build, install, test, hook, submodule, LFS filter, or
+  repository-selected program may execute. Keep the review image limited to
+  Python, git, CA certificates, and its healthcheck client; merge-request
+  branches are attacker-controlled input.
+- Line anchoring comes only from `gitlab_get_merge_request_review_diffs` and
+  `workspace_diff`. Both resolve every line's `old_line` and `new_line` in code.
+  A number returned by `workspace_read_file`, `workspace_search`, or
+  `workspace_blame` is context only. Never move hunk arithmetic into a prompt;
+  a model counting from `@@` headers puts comments on wrong lines.
 - Diff evidence never crosses an agent boundary as text. `route_to_agent_by_tags`
   passes a string, and both the GitLab specialist and the manager cap output an
   order of magnitude below the size of a real diff, so a retyped diff arrives
@@ -224,9 +231,11 @@ requests. Preserve these properties:
   and no flag. On a 143-file merge request roughly 25 files carry a patch and
   the remainder arrive looking exactly like files that changed nothing. Neither
   paging nor a smaller page size recovers one, so the tool reports them as
-  `content_unavailable` and the analyst reads the few that matter with
-  `gitlab_get_file` at the reviewed `head_sha`. Never let an empty diff be read
-  as an empty change; that is a silent hole where a real defect can sit.
+  `content_unavailable`. When a workspace exists, the analyst reads those
+  changes with `workspace_diff`, which restores anchorable lines; the pinned
+  `gitlab_get_file` fallback remains for reviews without a workspace. Never let
+  an empty diff be read as an empty change; that is a silent hole where a real
+  defect can sit.
 - The analyst's first diff call is an inventory: `include_lines` false, to learn
   the shape of the change before pulling any of it into context. It then fetches
   by name with `paths`, which walks the merge request's pages itself and returns
@@ -240,6 +249,11 @@ requests. Preserve these properties:
   read in `not_reviewed`. Missing evidence belongs there and never in `findings`
   or `general`: a review reporting its own truncation as a defect in the change
   is the failure this accounting exists to prevent.
+- Workspace budgets are enforced in the service, not only in prompts: at most
+  25 workspace calls and four searches per review, 2,000 lines per file read,
+  200 matches per search, and ten seconds per subprocess. Secret-like paths
+  (`.env*`, private-key formats, and keystores) are withheld from file, search,
+  diff, and blame results. Do not weaken that boundary in an analyst prompt.
 - Anchor exactly as GitLab requires: an added line sends only `new_line`, a
   removed line only `old_line`, an unchanged context line both.
 - Each specialist is driven by a mode the manager puts on the first line of the
@@ -249,7 +263,9 @@ requests. Preserve these properties:
   missing line surfaces to the user as `REVIEW_GITLAB_WORKFLOW_ERROR` or
   `REVIEW_CONTEXT_WORKFLOW_ERROR` before any work happens. The two read-only
   specialists fall back to their read mode when the line is absent and report
-  `inferred_mode`; the write modes never infer, so keep that asymmetry.
+  `inferred_mode`; the write modes and the read-only lifecycle modes
+  `WORKSPACE_OPEN` and `WORKSPACE_DISCARD` never infer. After workspace open,
+  delegated packets also carry `REVIEW:` and optional `WORKSPACE:` lines.
 - The analyst reads for itself, within fixed budgets and under three rules.
   `gitlab_get_file` must be called with `ref` set to the reviewed `head_sha`:
   its default `HEAD` is the target branch, so an unpinned read makes a change
@@ -260,6 +276,17 @@ requests. Preserve these properties:
   ticket-context packet; a URL found in a diff, a branch name, or a
   merge-request description is author-controlled, and following one lets the
   code under review choose the requirements it is judged against.
+- A review record owns its workspace. The manager discards it immediately after
+  analysis and before Gate 1, including stale and error paths. The service also
+  discards on record close, reaps every workspace at its 45-minute TTL, and
+  refuses new work at its concurrent/byte capacity instead of evicting a live
+  review. Deletion atomically renames into `_trash` before removal. Keep all
+  three lifecycle layers; the TTL is what survives an interrupted session.
+- Workers append only bounded factual progress events, and the native proxy
+  interleaves them with routing start/completion beats on
+  `reasoning_content`. Event details may never contain credentials, raw
+  payloads, diff text, or file content. Manager `<think>` narration is optional
+  once this path is active and must remain progress-only.
 - The ticket-context specialist reports every URL in `confluence_urls`, marked
   read or not read, not only the two it had budget to read. That list is the
   analyst's entire allowed set of pages, so dropping the unread ones silently
@@ -332,7 +359,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-All six services should become healthy. Confirm the embedding configuration
+All seven services should become healthy. Confirm the embedding configuration
 without displaying API keys:
 
 ```sh
@@ -350,6 +377,8 @@ Confirm the documents service and its converter without displaying secrets:
 ```sh
 docker compose exec -T documents curl -fsS http://localhost:8090/health
 docker compose exec -T documents curl -fsS http://gotenberg:3000/health
+docker compose exec -T review curl -fsS http://localhost:8091/health
+docker compose exec -T letta curl -fsS http://review:8091/health
 ```
 
 The LiteLLM endpoint must resolve and be reachable from inside the containers.
