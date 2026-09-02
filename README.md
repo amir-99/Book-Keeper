@@ -237,14 +237,17 @@ in the branch, and returns findings anchored to real diff lines.
 
 A review runs in three turns, with a confirmation gate before each write:
 
-1. **Review.** The GitLab specialist returns the merge request's `diff_refs`
-   and a diff whose lines already carry their resolved `old_line` and
-   `new_line`. The context specialist matches a `KEY-NUMBER` ticket id in the
-   source branch against the real Jira project keys, then reads that story, its
-   parent epic, and up to two Confluence pages linked from either. The analyst
-   turns both into a findings packet. Nothing is written to GitLab.
-2. **Stage.** After you confirm, each selected finding becomes an unpublished
-   draft note. Draft notes are visible only to their author, so you can review
+1. **Review.** The GitLab specialist returns the merge request's `diff_refs`,
+   its changed-file list, and a coverage count, but not the diff itself: the
+   analyst reads that from the same tool directly, so the lines it anchors to are
+   the ones GitLab returned rather than a copy retyped through two agents. The
+   context specialist matches a `KEY-NUMBER` ticket id in the source branch
+   against the real Jira project keys, then reads that story, its parent epic,
+   and up to two Confluence pages linked from either. The analyst turns both into
+   a findings packet. Nothing is written to GitLab.
+2. **Stage.** After you confirm, each selected anchored finding becomes an
+   unpublished draft note. A finding that could not be tied to a diff line is not
+   stageable and appears in the summary note at publication instead. Draft notes are visible only to their author, so you can review
    the exact anchoring in GitLab's diff view and discard anything wrong.
 3. **Publish.** After a second, separate confirmation, the drafts are published
    as one review with a summary note and a reviewer state.
@@ -253,7 +256,15 @@ Comments are authored by the account owning `GITLAB_ACCESS_TOKEN`; there is no
 separate bot identity, which is why the summary note carries a footer marking
 the review as machine-assisted. The agent cannot approve or merge a merge
 request, and both `head_sha` checks abort the flow if the author pushes new
-commits mid-review, since every stored line anchor would then be stale.
+commits mid-review, since every stored line anchor would then be stale. The
+analyst performs the same check when it fetches the diff, so a push during the
+read-only turn is caught before any finding is shown.
+
+The review states how much of the change it actually saw. Every diff read is
+capped, so the tool reports the files and lines it returned, the lines it
+dropped, and whether another page exists; the analyst pages through the rest
+within a fixed budget and lists whatever remains under what was not reviewed. A
+gap in the evidence is reported as a gap, never as a finding about the code.
 
 Progress is reported while the work runs: the manager emits a short thinking
 block before each specialist call, which Open WebUI renders live. A review of a

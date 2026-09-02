@@ -9,6 +9,12 @@ def gitlab_get_merge_request_review_diffs(
     count lines from an `@@` hunk header. Both come from the same read, so the
     refs always describe the returned patches.
 
+    The `coverage` object reports what this one response actually contains:
+    files and lines returned, lines dropped by the caps, whether another page
+    exists, and a `complete` flag that is true only when this response holds
+    every changed line of the merge request. A caller aggregating several pages
+    judges completeness across them, not from a single response.
+
     Args:
         project_id: Numeric project ID or full path such as group/project.
         merge_request_iid: Positive project-scoped merge-request IID.
@@ -55,10 +61,14 @@ def gitlab_get_merge_request_review_diffs(
     # patches. Reading both here keeps the refs and the patches consistent.
     query = urlencode({"per_page": limit, "page": page})
     results = []
-    for path in (f"merge_requests/{merge_request_iid}", f"merge_requests/{merge_request_iid}/diffs?{query}"):
+    next_page_header = None
+    paths = (f"merge_requests/{merge_request_iid}", f"merge_requests/{merge_request_iid}/diffs?{query}")
+    for index, path in enumerate(paths):
         try:
             with urlopen(Request(f"{base_url}/api/v4/projects/{encoded_project}/{path}", headers=headers), timeout=30) as response:
                 results.append(json.loads(response.read()))
+                if index == 1:
+                    next_page_header = response.headers.get("X-Next-Page")
         except HTTPError as error:
             return f"GITLAB_ERROR: GitLab returned HTTP {error.code} while reading the merge request for review"
         except (URLError, OSError, ValueError, json.JSONDecodeError) as error:
@@ -76,6 +86,7 @@ def gitlab_get_merge_request_review_diffs(
     hunk_header = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
     files = []
     total_lines = 0
+    total_dropped = 0
     for item in payload:
         if not isinstance(item, dict):
             continue
@@ -83,7 +94,7 @@ def gitlab_get_merge_request_review_diffs(
         patch = item.get("diff") if isinstance(item.get("diff"), str) else ""
         lines = []
         old_no = new_no = 0
-        truncated = False
+        dropped = 0
         # A patch normally ends with a newline; splitting it directly would add a
         # phantom trailing context line and desynchronize every later line number.
         for raw in (patch[:-1] if patch.endswith("\n") else patch).split("\n"):
@@ -95,25 +106,65 @@ def gitlab_get_merge_request_review_diffs(
                 continue
             if old_no == 0 and new_no == 0:
                 continue
-            if len(lines) >= max_lines_per_file or total_lines >= max_total_lines:
-                truncated = True
-                break
             marker, text = (raw[:1], raw[1:]) if raw else (" ", "")
+            if marker not in ("+", "-", " "):
+                continue
+            # Past a cap the remaining lines are counted rather than dropped
+            # silently, so the caller learns exactly how much evidence is missing
+            # instead of inferring it from a boolean.
+            if len(lines) >= max_lines_per_file or total_lines >= max_total_lines:
+                dropped += 1
+                continue
             if marker == "+":
                 lines.append(["add", None, new_no, text])
                 new_no += 1
             elif marker == "-":
                 lines.append(["del", old_no, None, text])
                 old_no += 1
-            elif marker == " ":
+            else:
                 lines.append(["ctx", old_no, new_no, text])
                 old_no += 1
                 new_no += 1
-            else:
-                continue
             total_lines += 1
-        entry.update({"lines": lines, "truncated": truncated or bool(item.get("too_large"))})
+        total_dropped += dropped
+        entry.update({
+            "lines": lines,
+            "lines_returned": len(lines),
+            "lines_dropped": dropped,
+            "truncated": bool(dropped) or bool(item.get("too_large")),
+        })
         files.append(entry)
+
+    # changes_count is the merge request's own file count and may arrive as an
+    # approximate string such as "20+" on very large merge requests.
+    changes_count = merge_request.get("changes_count")
+    files_total = None
+    files_total_approximate = False
+    if isinstance(changes_count, int) and not isinstance(changes_count, bool):
+        files_total = changes_count
+    elif isinstance(changes_count, str):
+        counted = changes_count.strip()
+        files_total_approximate = counted.endswith("+")
+        digits = counted[:-1] if files_total_approximate else counted
+        if digits.isdigit():
+            files_total = int(digits)
+
+    if next_page_header is None:
+        # Older GitLab releases omit the pagination header on this endpoint; a
+        # full page is then the only evidence that another one may exist.
+        next_page = None
+        has_more_pages = len(payload) >= limit
+    else:
+        stripped = next_page_header.strip()
+        next_page = int(stripped) if stripped.isdigit() else None
+        has_more_pages = next_page is not None
+    files_truncated = [entry.get("new_path") or entry.get("old_path") for entry in files if entry["truncated"]]
+    complete = (
+        not files_truncated
+        and total_dropped == 0
+        and not has_more_pages
+        and (files_total is None or (not files_total_approximate and len(files) >= files_total))
+    )
 
     return json.dumps(
         {
@@ -132,6 +183,17 @@ def gitlab_get_merge_request_review_diffs(
             "limit": limit,
             "returned": len(files),
             "total_lines": total_lines,
+            "coverage": {
+                "files_total": files_total,
+                "files_total_approximate": files_total_approximate,
+                "files_returned": len(files),
+                "files_truncated": files_truncated,
+                "lines_returned": total_lines,
+                "lines_dropped": total_dropped,
+                "has_more_pages": has_more_pages,
+                "next_page": next_page,
+                "complete": complete,
+            },
         },
         ensure_ascii=False,
     )

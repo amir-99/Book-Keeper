@@ -33,9 +33,10 @@ def load_tool(name):
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self.body = b"" if payload is None else json.dumps(payload).encode()
         self.status = status
+        self.headers = headers or {}
 
     def __enter__(self):
         return self
@@ -140,6 +141,108 @@ class ReviewDiffTests(unittest.TestCase):
         payload = json.loads(result)
         self.assertEqual(len(payload["files"][0]["lines"]), 20)
         self.assertTrue(payload["files"][0]["truncated"])
+        self.assertEqual(payload["files"][0]["lines_returned"], 20)
+        self.assertEqual(payload["files"][0]["lines_dropped"], 20)
+        self.assertEqual(payload["coverage"]["lines_dropped"], 20)
+        self.assertEqual(payload["coverage"]["files_truncated"], ["b.py"])
+        self.assertFalse(payload["coverage"]["complete"])
+
+    def test_coverage_is_complete_for_a_fully_returned_merge_request(self):
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [
+                dict(MERGE_REQUEST, changes_count="1"),
+                FakeResponse(
+                    [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,1 +1,1 @@\n+only\n"}],
+                    headers={"X-Next-Page": ""},
+                ),
+            ],
+            "group/app",
+            42,
+        )
+        coverage = json.loads(result)["coverage"]
+        self.assertTrue(coverage["complete"])
+        self.assertEqual(coverage["files_total"], 1)
+        self.assertEqual(coverage["files_returned"], 1)
+        self.assertEqual(coverage["lines_returned"], 1)
+        self.assertEqual(coverage["lines_dropped"], 0)
+        self.assertFalse(coverage["has_more_pages"])
+        self.assertIsNone(coverage["next_page"])
+
+    def test_further_pages_are_reported_and_block_completeness(self):
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [
+                dict(MERGE_REQUEST, changes_count="60"),
+                FakeResponse(
+                    [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,1 +1,1 @@\n+only\n"}],
+                    headers={"X-Next-Page": "2"},
+                ),
+            ],
+            "group/app",
+            42,
+        )
+        coverage = json.loads(result)["coverage"]
+        self.assertTrue(coverage["has_more_pages"])
+        self.assertEqual(coverage["next_page"], 2)
+        self.assertFalse(coverage["complete"])
+
+    def test_missing_pagination_header_falls_back_to_a_full_page(self):
+        files = [
+            {"old_path": f"f{index}.py", "new_path": f"f{index}.py", "diff": "@@ -1,1 +1,1 @@\n+only\n"}
+            for index in range(2)
+        ]
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [MERGE_REQUEST, files],
+            "group/app",
+            42,
+            limit=2,
+        )
+        coverage = json.loads(result)["coverage"]
+        self.assertTrue(coverage["has_more_pages"])
+        self.assertIsNone(coverage["next_page"])
+        self.assertFalse(coverage["complete"])
+
+    def test_approximate_file_count_is_never_reported_as_complete(self):
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [
+                dict(MERGE_REQUEST, changes_count="20+"),
+                FakeResponse(
+                    [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,1 +1,1 @@\n+only\n"}],
+                    headers={"X-Next-Page": ""},
+                ),
+            ],
+            "group/app",
+            42,
+        )
+        coverage = json.loads(result)["coverage"]
+        self.assertTrue(coverage["files_total_approximate"])
+        self.assertFalse(coverage["complete"])
+
+    def test_too_large_file_is_truncated_without_dropped_lines(self):
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [
+                dict(MERGE_REQUEST, changes_count="1"),
+                FakeResponse(
+                    [{"old_path": "big.bin", "new_path": "big.bin", "diff": "", "too_large": True}],
+                    headers={"X-Next-Page": ""},
+                ),
+            ],
+            "group/app",
+            42,
+        )
+        payload = json.loads(result)
+        self.assertTrue(payload["files"][0]["truncated"])
+        self.assertEqual(payload["coverage"]["files_truncated"], ["big.bin"])
+        self.assertFalse(payload["coverage"]["complete"])
 
     def test_merge_request_without_diff_refs_is_refused(self):
         result, _ = call(

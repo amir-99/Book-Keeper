@@ -201,6 +201,24 @@ requests. Preserve these properties:
   returns `diff_refs` and the patches from the same read and resolves every
   line's `old_line` and `new_line` itself. Never move that arithmetic into a
   prompt; a model counting from `@@` headers puts comments on wrong lines.
+- Diff evidence never crosses an agent boundary as text. `route_to_agent_by_tags`
+  passes a string, and both the GitLab specialist and the manager cap output an
+  order of magnitude below the size of a real diff, so a retyped diff arrives
+  summarized and the review can anchor nothing. The GitLab specialist therefore
+  returns metadata only, and the analyst holds
+  `gitlab_get_merge_request_review_diffs` and reads the diff itself, pinned to
+  the `expected_head_sha` the manager sends and returning `REVIEW_STALE` when it
+  has moved. Keep both halves: pasting diff text into a delegated message, or
+  letting the GitLab specialist emit diff lines again, reintroduces the failure
+  silently and it looks like a weak review rather than a broken pipeline.
+- Coverage is computed by the tool, never claimed by a model. Its `coverage`
+  object reports files and lines returned, lines dropped by the caps, whether a
+  further page exists, and a `complete` flag that is true only when one response
+  holds the whole change. The analyst pages and re-fetches truncated files within
+  a fixed call budget, echoes those numbers, and lists what it still could not
+  read in `not_reviewed`. Missing evidence belongs there and never in `findings`
+  or `general`: a review reporting its own truncation as a defect in the change
+  is the failure this accounting exists to prevent.
 - Anchor exactly as GitLab requires: an added line sends only `new_line`, a
   removed line only `old_line`, an unchanged context line both.
 - Each specialist is driven by a mode the manager puts on the first line of the
@@ -211,6 +229,16 @@ requests. Preserve these properties:
   `REVIEW_CONTEXT_WORKFLOW_ERROR` before any work happens. The two read-only
   specialists fall back to their read mode when the line is absent and report
   `inferred_mode`; the write modes never infer, so keep that asymmetry.
+- Only anchored findings can be staged. `gitlab_create_merge_request_draft_note`
+  requires at least one positive line number, so a `general` entry has no home
+  except the summary note published at the end. The first gate must offer the
+  anchored count and the general count separately, and must not open at all when
+  nothing is anchorable.
+- A cached Jira project key list may confirm a key but never refute one. The
+  ticket-context specialist re-reads `jira_list_projects` before rejecting a
+  branch's `KEY-NUMBER` candidate whose prefix the cache does not contain;
+  without that, a project created after the cache was written stays invisible and
+  every merge request under it reviews with no ticket context.
 - Two confirmations are mandatory and distinct. The first authorizes staging
   unpublished draft notes; the second authorizes publication. Asking for a
   review never authorizes either, and a finding never authorizes posting itself.
