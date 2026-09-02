@@ -211,6 +211,27 @@ requests. Preserve these properties:
   has moved. Keep both halves: pasting diff text into a delegated message, or
   letting the GitLab specialist emit diff lines again, reintroduces the failure
   silently and it looks like a weak review rather than a broken pipeline.
+- The GitLab specialist calls `gitlab_get_merge_request_review_diffs` exactly
+  once, with `include_lines` false. Its context is small and a diff payload is
+  not: repeated fetches overflow it, Letta's summarizer then drops the delegated
+  `MODE:` line, and the worker answers the next step by asking the manager for a
+  mode it was already given. That surfaces as a stalled review rather than as an
+  error, so keep the single call and keep `include_lines` false. Never tell a
+  worker not to emit something it can only obtain in full; give it a call that
+  does not fetch it.
+- GitLab renders patch text only for a merge request's earliest files, up to a
+  budget for the whole merge request, and returns the rest with an empty diff
+  and no flag. On a 143-file merge request roughly 25 files carry a patch and
+  the remainder arrive looking exactly like files that changed nothing. Neither
+  paging nor a smaller page size recovers one, so the tool reports them as
+  `content_unavailable` and the analyst reads the few that matter with
+  `gitlab_get_file` at the reviewed `head_sha`. Never let an empty diff be read
+  as an empty change; that is a silent hole where a real defect can sit.
+- The analyst's first diff call is an inventory: `include_lines` false, to learn
+  the shape of the change before pulling any of it into context. It then fetches
+  by name with `paths`, which walks the merge request's pages itself and returns
+  only the files asked for. Paging blindly through a large merge request
+  overflows the analyst the same way it overflowed the GitLab specialist.
 - Coverage is computed by the tool, never claimed by a model. Its `coverage`
   object reports files and lines returned, lines dropped by the caps, whether a
   further page exists, and a `complete` flag that is true only when one response

@@ -244,6 +244,76 @@ class ReviewDiffTests(unittest.TestCase):
         self.assertEqual(payload["coverage"]["files_truncated"], ["big.bin"])
         self.assertFalse(payload["coverage"]["complete"])
 
+    def test_include_lines_false_withholds_text_but_keeps_exact_counts(self):
+        body = "    self.assertEqual(response.status_code, 200)  # realistic width"
+        patch_text = "@@ -1,40 +1,40 @@\n" + "".join(f"+{body}{index}\n" for index in range(40))
+        payloads = [dict(MERGE_REQUEST, changes_count="1"), [{"old_path": "b.py", "new_path": "b.py", "diff": patch_text}]]
+        full, _ = call(
+            "gitlab_get_merge_request_review_diffs", GITLAB_ENV, payloads,
+            "group/app", 42, max_lines_per_file=20,
+        )
+        lean, _ = call(
+            "gitlab_get_merge_request_review_diffs", GITLAB_ENV, payloads,
+            "group/app", 42, max_lines_per_file=20, include_lines=False,
+        )
+        full_payload, lean_payload = json.loads(full), json.loads(lean)
+        self.assertNotIn("lines", lean_payload["files"][0])
+        self.assertFalse(lean_payload["lines_included"])
+        self.assertTrue(full_payload["lines_included"])
+        self.assertEqual(lean_payload["coverage"], full_payload["coverage"])
+        self.assertEqual(lean_payload["files"][0]["lines_returned"], 20)
+        self.assertEqual(lean_payload["files"][0]["lines_dropped"], 20)
+        self.assertNotIn(body, lean)
+        # Every withheld line is a line the caller does not pull into its context.
+        self.assertGreater(len(full) - len(lean), 20 * len(body))
+
+    def test_include_lines_must_be_a_boolean(self):
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs", GITLAB_ENV, [],
+            "group/app", 42, include_lines="no",
+        )
+        self.assertEqual(result, "GITLAB_ERROR: include_lines must be a boolean")
+
+    def test_withheld_patch_is_reported_not_read_as_an_empty_change(self):
+        files = [
+            {"old_path": "a.py", "new_path": "a.py", "new_file": True, "diff": "", "a_mode": "0", "b_mode": "100644"},
+            {"old_path": "was.py", "new_path": "now.py", "renamed_file": True, "diff": "", "a_mode": "100644", "b_mode": "100644"},
+            {"old_path": "s.sh", "new_path": "s.sh", "diff": "", "a_mode": "100644", "b_mode": "100755"},
+        ]
+        result, _ = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [dict(MERGE_REQUEST, changes_count="3"), FakeResponse(files, headers={"X-Next-Page": ""})],
+            "group/app",
+            42,
+        )
+        payload = json.loads(result)
+        # A withheld patch is a hole; a pure rename and a mode change are not.
+        self.assertTrue(payload["files"][0]["content_unavailable"])
+        self.assertFalse(payload["files"][1]["content_unavailable"])
+        self.assertFalse(payload["files"][2]["content_unavailable"])
+        self.assertEqual(payload["coverage"]["files_unavailable"], ["a.py"])
+        self.assertFalse(payload["coverage"]["complete"])
+
+    def test_paths_selects_files_across_pages_and_reports_misses(self):
+        page_one = [{"old_path": f"f{i}.py", "new_path": f"f{i}.py", "diff": "@@ -1,1 +1,1 @@\n+a\n"} for i in range(2)]
+        page_two = [{"old_path": "wanted.py", "new_path": "wanted.py", "diff": "@@ -1,1 +1,1 @@\n+target\n"}]
+        result, requests = call(
+            "gitlab_get_merge_request_review_diffs",
+            GITLAB_ENV,
+            [MERGE_REQUEST, FakeResponse(page_one), FakeResponse(page_two)],
+            "group/app",
+            42,
+            limit=2,
+            paths="wanted.py, absent.py",
+        )
+        payload = json.loads(result)
+        self.assertEqual([f["new_path"] for f in payload["files"]], ["wanted.py"])
+        self.assertEqual(payload["files"][0]["lines"], [["add", None, 1, "target"]])
+        self.assertEqual(payload["coverage"]["paths_not_found"], ["absent.py"])
+        self.assertFalse(payload["coverage"]["has_more_pages"])
+        self.assertEqual(len(requests), 3)
+
     def test_merge_request_without_diff_refs_is_refused(self):
         result, _ = call(
             "gitlab_get_merge_request_review_diffs",
